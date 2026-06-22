@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pydantic
+openai
+jinja2
+pytz
+google-genai
+requests
+qrcode[pil]
+python-multipart
+pypdf
