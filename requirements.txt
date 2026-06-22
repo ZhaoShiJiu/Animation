@@ -9,3 +9,4 @@ requests
 qrcode[pil]
 python-multipart
 pypdf
+playwright>=1.59.0

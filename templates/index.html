@@ -315,6 +315,62 @@
         </div>
     </div>
 
+    <!-- Video Export Modal -->
+    <div id="export-modal" class="modal-overlay">
+        <form id="export-form" class="modal-content share-form">
+            <button id="export-modal-close" class="modal-close-button" type="button" title="Close">×</button>
+            <p data-translate-key="exportAsVideo">导出为视频</p>
+
+            <label>
+                <span data-translate-key="exportResolutionLabel">输出分辨率</span>
+                <select id="export-resolution">
+                    <option value="1280x720">720p (1280 × 720)</option>
+                    <option value="1920x1080" selected>1080p (1920 × 1080)</option>
+                    <option value="2560x1440">2K (2560 × 1440)</option>
+                </select>
+            </label>
+
+            <label>
+                <span data-translate-key="exportFpsLabel">帧率</span>
+                <select id="export-fps">
+                    <option value="24" selected>24 fps</option>
+                    <option value="30">30 fps</option>
+                    <option value="60">60 fps</option>
+                </select>
+            </label>
+
+            <label>
+                <span data-translate-key="exportExpirationLabel">文件保留时间</span>
+                <select id="export-expiration">
+                    <option value="10m" data-translate-key="exportRetention10m">10 分钟</option>
+                    <option value="1h" selected data-translate-key="exportRetention1h">1 小时</option>
+                    <option value="6h" data-translate-key="exportRetention6h">6 小时</option>
+                    <option value="1d" data-translate-key="exportRetention1d">1 天</option>
+                    <option value="7d" data-translate-key="exportRetention7d">7 天</option>
+                </select>
+            </label>
+
+            <button id="export-start-button" class="modal-button" type="submit"
+                    data-translate-key="exportStartRender">开始渲染</button>
+
+            <div id="export-progress" class="export-progress" hidden>
+                <div class="progress-bar-track">
+                    <div id="export-progress-bar" class="progress-bar-fill" style="width:0%"></div>
+                </div>
+                <div class="export-progress-info">
+                    <span id="export-progress-text" data-translate-key="exportInitializing">初始化中...</span>
+                    <span id="export-progress-percent">0%</span>
+                </div>
+            </div>
+
+            <div id="export-result" class="share-result" hidden>
+                <button id="export-download-button" class="modal-button"
+                        data-translate-key="exportDownloadVideo">下载 MP4</button>
+            </div>
+        </form>
+    </div>
+
+    <!-- Feature coming-soon modal (kept for future features) -->
     <div id="feature-modal" class="modal-overlay">
         <div class="modal-content">
             <button id="modal-close-button" class="modal-close-button" title="Close">×</button>

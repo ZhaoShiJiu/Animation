@@ -100,6 +100,18 @@ document.addEventListener('DOMContentLoaded', () => {
         exportAsVideo: { zh: "导出为视频", en: "Export as Video" },
         featureComingSoon: { zh: "该功能正在开发中，将在不久的将来推出。\n 请关注我的官方 GitHub 仓库以获取最新动态！", en: "This feature is under development and will be available soon.\n Follow our official GitHub repository for the latest updates!" },
         visitGitHub: { zh: "访问 GitHub", en: "Visit GitHub" },
+        exportResolutionLabel: { zh: "输出分辨率", en: "Output resolution" },
+        exportFpsLabel: { zh: "帧率", en: "Frame rate" },
+        exportExpirationLabel: { zh: "文件保留时间", en: "File retention" },
+        exportStartRender: { zh: "开始渲染", en: "Start rendering" },
+        exportInitializing: { zh: "初始化中...", en: "Initializing..." },
+        exportDownloadVideo: { zh: "下载 MP4", en: "Download MP4" },
+        exportRendering: { zh: "渲染中...", en: "Rendering..." },
+        exportRetention10m: { zh: "10 分钟", en: "10 minutes" },
+        exportRetention1h: { zh: "1 小时", en: "1 hour" },
+        exportRetention6h: { zh: "6 小时", en: "6 hours" },
+        exportRetention1d: { zh: "1 天", en: "1 day" },
+        exportRetention7d: { zh: "7 天", en: "7 days" },
         errorMessage: { zh: "抱歉，服务出现了一点问题。请稍后重试。", en: "Sorry, something went wrong. Please try again later." },
         errorFetchFailed: {zh: "LLM服务不可用，请稍后再试", en: "LLM service is unavailable. Please try again later."},
         errorTooManyRequests: {zh: "今天已经使用太多，请明天再试", en: "Too many requests today. Please try again tomorrow."},
@@ -150,6 +162,19 @@ document.addEventListener('DOMContentLoaded', () => {
     const languageSwitcher = document.getElementById('language-switcher');
     const placeholderContainer = document.getElementById('animated-placeholder');
     const featureModal = document.getElementById('feature-modal');
+    const exportModal = document.getElementById('export-modal');
+    const exportForm = document.getElementById('export-form');
+    const exportResolution = document.getElementById('export-resolution');
+    const exportFps = document.getElementById('export-fps');
+    const exportExpiration = document.getElementById('export-expiration');
+    const exportStartButton = document.getElementById('export-start-button');
+    const exportModalClose = document.getElementById('export-modal-close');
+    const exportProgress = document.getElementById('export-progress');
+    const exportProgressBar = document.getElementById('export-progress-bar');
+    const exportProgressText = document.getElementById('export-progress-text');
+    const exportProgressPercent = document.getElementById('export-progress-percent');
+    const exportResult = document.getElementById('export-result');
+    const exportDownloadButton = document.getElementById('export-download-button');
     const previewConfirmModal = document.getElementById('preview-confirm-modal');
     const previewConfirmClose = document.getElementById('preview-confirm-close');
     const previewConfirmCancel = document.getElementById('preview-confirm-cancel');
@@ -209,6 +234,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let pendingPaperFile = null;
     let pendingPaperFocus = '';
     let pendingShareHtml = '';
+    let pendingExportHtml = '';
     let latestShareDetails = null;
     let previewConfirmResolver = null;
 
@@ -801,6 +827,112 @@ document.addEventListener('DOMContentLoaded', () => {
         await copyShareDetails();
     }
 
+    function openExportModal(htmlContent) {
+        pendingExportHtml = htmlContent;
+        exportProgress.hidden = true;
+        exportResult.hidden = true;
+        exportStartButton.disabled = false;
+        exportStartButton.textContent = translations.exportStartRender[currentLang];
+        exportModal.classList.add('visible');
+    }
+
+    function closeExportModal() {
+        exportModal.classList.remove('visible');
+        pendingExportHtml = '';
+    }
+
+    async function handleExportSubmit(e) {
+        e.preventDefault();
+        if (!pendingExportHtml) return;
+
+        // Client-side size validation
+        const htmlSizeMB = (new Blob([pendingExportHtml]).size / (1024 * 1024)).toFixed(1);
+        if (parseFloat(htmlSizeMB) > 3) {
+            showWarning(`HTML size (${htmlSizeMB} MB) is large. Consider saving as HTML first, then sharing.`);
+        }
+
+        const [width, height] = exportResolution.value.split('x').map(Number);
+        const fps = parseInt(exportFps.value);
+
+        exportStartButton.disabled = true;
+        exportResult.hidden = true;
+        exportProgress.hidden = false;
+        exportProgressText.textContent = translations.exportInitializing[currentLang];
+        exportProgressPercent.textContent = '0%';
+        exportProgressBar.style.width = '0%';
+
+        const durationMatch = pendingExportHtml.match(/<meta\s+name="animation-duration"\s+content="([\d.]+)"/i);
+        const durationHint = durationMatch ? parseFloat(durationMatch[1]) : null;
+
+        try {
+            const response = await fetch(`${config.apiBaseUrl}/export/video`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    html: pendingExportHtml,
+                    width, height, fps,
+                    expires_in: exportExpiration.value,
+                    duration_seconds: durationHint,
+                }),
+            });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let videoId = null;
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n\n');
+                buffer = lines.pop();
+
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    const jsonStr = line.substring(6);
+                    if (jsonStr.includes('[DONE]')) {
+                        try {
+                            const data = JSON.parse(jsonStr);
+                            videoId = data.video_id;
+                        } catch (err) { /* ignore */ }
+                        break;
+                    }
+                    try {
+                        const data = JSON.parse(jsonStr);
+                        if (data.event === 'queued') {
+                            exportProgressText.textContent = data.message || '任务排队中...';
+                        } else if (data.event === 'started') {
+                            exportProgressText.textContent = data.message || '任务开始执行';
+                        } else if (data.status && data.percent !== undefined) {
+                            exportProgressText.textContent = data.message || translations.exportRendering[currentLang];
+                            exportProgressPercent.textContent = `${Math.round(data.percent)}%`;
+                            exportProgressBar.style.width = `${Math.round(data.percent)}%`;
+                        }
+                    } catch (err) { /* skip partial chunks */ }
+                }
+                if (videoId) break;
+            }
+
+            if (videoId) {
+                exportProgress.hidden = true;
+                exportResult.hidden = false;
+                exportDownloadButton.onclick = () => {
+                    window.open(`${config.apiBaseUrl}/video/${videoId}`, '_blank');
+                };
+                window.open(`${config.apiBaseUrl}/video/${videoId}`, '_blank');
+                exportStartButton.disabled = false;
+                exportStartButton.textContent = translations.exportStartRender[currentLang];
+            }
+        } catch (error) {
+            console.error('Video export failed:', error);
+            showWarning('Video export failed. Please try again.');
+            exportStartButton.disabled = false;
+            exportStartButton.textContent = translations.exportStartRender[currentLang];
+        }
+    }
+
     function appendAnimationPlayer(htmlContent, topic) {
         console.log('Appending animation player with topic:', topic);
         const node = templates.player.content.cloneNode(true);
@@ -840,9 +972,7 @@ document.addEventListener('DOMContentLoaded', () => {
             openShareModal(htmlContent);
         });
         playerElement.querySelector('.export-video')?.addEventListener('click', () => {
-            featureModal.querySelector('p').textContent = translations.featureComingSoon[currentLang];
-            modalGitHubButton.textContent = translations.visitGitHub[currentLang];
-            featureModal.classList.add('visible');
+            openExportModal(htmlContent);
         });
         chatLog.appendChild(playerElement);
         scrollToBottom();
@@ -992,6 +1122,12 @@ document.addEventListener('DOMContentLoaded', () => {
             window.open('https://github.com/ZhaoShiJiu/Animation', '_blank');
             hideModal();
         });
+
+        exportModalClose?.addEventListener('click', closeExportModal);
+        exportModal?.addEventListener('click', (e) => {
+            if (e.target === exportModal) closeExportModal();
+        });
+        exportForm?.addEventListener('submit', handleExportSubmit);
 
         const savedLang = localStorage.getItem('preferredLanguage');
         const browserLang = navigator.language?.toLowerCase() || ''; // e.g. 'zh-cn'

@@ -12,7 +12,7 @@ from urllib.parse import parse_qs
 import pytz
 import qrcode
 from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI, OpenAIError
 from pydantic import BaseModel, Field
@@ -20,6 +20,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from pypdf import PdfReader
+from video_exporter import get_video_exporter
 try:
     import google.generativeai as genai
 except ModuleNotFoundError:
@@ -38,7 +39,9 @@ MAX_CONCURRENT_GENERATION_TASKS = credentials.get("MAX_CONCURRENT_GENERATION_TAS
 MAX_PAPER_UPLOAD_BYTES = credentials.get("MAX_PAPER_UPLOAD_BYTES", 20 * 1024 * 1024)
 MAX_PAPER_TEXT_CHARS = credentials.get("MAX_PAPER_TEXT_CHARS", 120000)
 ACCESS_PASSPHRASES = credentials.get("ACCESS_PASSPHRASES")
+MAX_CONCURRENT_EXPORT_TASKS = credentials.get("MAX_CONCURRENT_EXPORT_TASKS", 1)
 generation_semaphore = asyncio.Semaphore(MAX_CONCURRENT_GENERATION_TASKS)
+export_semaphore = asyncio.Semaphore(MAX_CONCURRENT_EXPORT_TASKS)
 shared_html_links = {}
 SHARE_STORAGE_DIR = os.path.join(os.path.dirname(__file__), "shared_html")
 SHARE_CLEANUP_INTERVAL_SECONDS = 300
@@ -53,6 +56,27 @@ SHARE_EXPIRATION_SECONDS = {
     "3d": 3 * 24 * 60 * 60,
     "7d": 7 * 24 * 60 * 60,
     "forever": None,
+}
+
+# Video export storage
+VIDEO_STORAGE_DIR = os.path.join(os.path.dirname(__file__), "exported_videos")
+VIDEO_CLEANUP_INTERVAL_SECONDS = 300
+VIDEO_DEFAULT_RETENTION_SECONDS = 60 * 60  # 1 hour
+
+VIDEO_EXPIRATION_SECONDS = {
+    "10m": 10 * 60,
+    "1h": 60 * 60,
+    "6h": 6 * 60 * 60,
+    "1d": 24 * 60 * 60,
+    "7d": 7 * 24 * 60 * 60,
+}
+
+# Maps UI duration setting → approximate seconds (used for meta tag hint)
+DURATION_SECONDS_HINT = {
+    "preview": 12,
+    "short": 30,
+    "medium": 60,
+    "long": 90,
 }
 
 
@@ -212,6 +236,16 @@ class ShareRequest(BaseModel):
     sourceHeight: int = 1080
 
 
+class VideoExportRequest(BaseModel):
+    html: Optional[str] = Field(default=None, max_length=5_000_000)  # ~5 MB
+    share_id: Optional[str] = Field(default=None, max_length=64)
+    width: int = Field(default=1920, ge=640, le=4096)
+    height: int = Field(default=1080, ge=360, le=4096)
+    fps: int = Field(default=24, ge=12, le=60)
+    expires_in: str = Field(default="1h", pattern=r"^(10m|1h|6h|1d|7d)$")
+    duration_seconds: Optional[float] = None
+
+
 def build_generation_setting_instructions(settings: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
     settings = settings or {}
     allowed_styles = {
@@ -279,6 +313,7 @@ async def llm_event_stream(
     })
 
     # The system prompt is now more focused
+    duration_sec = DURATION_SECONDS_HINT.get(settings.get("duration", "medium"), 60)
     system_prompt = f"""请你生成一个非常精美的动态动画,讲讲 {topic}
 要动态的,要像一个完整的,正在播放的视频。包含一个完整的过程，能把知识点讲清楚。
 页面极为精美，好看，有设计感，同时能够很好的传达知识。知识和图像要准确
@@ -294,6 +329,11 @@ async def llm_event_stream(
 不需要任何互动按钮,直接开始播放
 使用和谐好看，广泛采用的浅色配色方案，使用很多的，丰富的视觉元素。
 **请保证任何一个元素都在指定分辨率的容器中被摆在了正确的位置，避免穿模，字幕遮挡，图形位置错误等等问题影响正确的视觉传达**
+视频导出兼容性：
+- 在 <head> 中添加 <meta name="animation-duration" content="{duration_sec}"> 声明动画总秒数。
+- 强烈建议使用 GSAP（从 CDN: https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js）创建动画时间线，而非纯 CSS animation，这样视频导出质量更高。
+- 如果使用 GSAP，请将时间线注册到 window.__timelines 对象上。
+- 所有动画必须自动播放，不依赖用户交互，不依赖随机数或当前时间。
 html+css+js+svg，放进一个html里，直接只给出html，不用其它总结"""
 
     messages = [
@@ -422,6 +462,7 @@ async def paper_llm_event_stream(
     )
     truncation_instruction = "论文原文因长度限制已被截断，请基于已提供内容生成，并避免声称看到了未提供的部分。" if truncated else "论文原文已完整提供给你。"
 
+    duration_sec = DURATION_SECONDS_HINT.get(settings.get("duration", "medium"), 60)
     system_prompt = f"""你是一个论文动画讲解视频导演和技术讲师。请根据用户上传的 PDF 论文内容，生成一个非常精美、可直接播放的动态动画讲解页面。
 {focus_instruction}
 {truncation_instruction}
@@ -443,7 +484,12 @@ async def paper_llm_event_stream(
 - 请保证任何元素都在指定分辨率的容器中正确摆放，避免字幕遮挡、图形穿模和布局错位。
 输出要求：
 - 只输出一个完整的单文件 HTML。
-- HTML 内联 CSS、JS、SVG；不要输出解释、总结或 Markdown 代码块外的文字。"""
+- HTML 内联 CSS、JS、SVG；不要输出解释、总结或 Markdown 代码块外的文字。
+视频导出兼容性：
+- 在 <head> 中添加 <meta name="animation-duration" content="{duration_sec}"> 声明动画总秒数。
+- 强烈建议使用 GSAP（从 CDN: https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js）创建动画时间线，而非纯 CSS animation，这样视频导出质量更高。
+- 如果使用 GSAP，请将时间线注册到 window.__timelines 对象上。
+- 所有动画必须自动播放，不依赖用户交互，不依赖随机数或当前时间。"""
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -709,6 +755,8 @@ async def cleanup_expired_shares_loop():
 async def start_share_cleanup_task():
     cleanup_expired_shares_once()
     asyncio.create_task(cleanup_expired_shares_loop())
+    cleanup_expired_videos_once()
+    asyncio.create_task(cleanup_expired_videos_loop())
 
 
 @app.post("/share")
@@ -855,6 +903,121 @@ async def generate_paper(
         "X-Accel-Buffering": "no",
     }
     return StreamingResponse(event_generator(), headers=headers)
+
+@app.post("/export/video")
+async def export_video(video_request: VideoExportRequest, request: Request):
+    """Export an HTML animation page to MP4 video via SSE progress stream."""
+    # Resolve HTML content — prefer share_id, fall back to direct html
+    html_content = None
+    if video_request.share_id:
+        record = get_share_record(video_request.share_id)
+        if record:
+            html_content = record.get("html") or ""
+        if not html_content:
+            raise HTTPException(status_code=404, detail="Share not found or expired")
+
+    if not html_content and video_request.html:
+        html_content = video_request.html
+
+    if not html_content:
+        raise HTTPException(status_code=400, detail="Either html or share_id is required")
+
+    exporter = get_video_exporter()
+    progress_queue: asyncio.Queue = asyncio.Queue()
+    queued = export_semaphore.locked()
+
+    async def _push(status: str, percent: float, message: str):
+        await progress_queue.put({
+            "status": status, "percent": percent, "message": message,
+        })
+
+    retention = VIDEO_EXPIRATION_SECONDS.get(
+        video_request.expires_in, VIDEO_DEFAULT_RETENTION_SECONDS
+    )
+
+    async def _do_export():
+        return await exporter.export(
+            html=html_content,
+            width=video_request.width,
+            height=video_request.height,
+            fps=video_request.fps,
+            duration_hint=video_request.duration_seconds,
+            retention_seconds=retention,
+            on_progress=_push,
+        )
+
+    async def event_generator():
+        nonlocal queued
+
+        if queued:
+            yield f"data: {json.dumps({'event': 'queued', 'message': '导出任务排队中...'})}\n\n"
+
+        async with export_semaphore:
+            if queued:
+                yield f"data: {json.dumps({'event': 'started', 'message': '导出任务开始执行'})}\n\n"
+
+            render_task = asyncio.create_task(_do_export())
+
+            while True:
+                try:
+                    event = await asyncio.wait_for(progress_queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    if render_task.done():
+                        exc = render_task.exception()
+                        if exc:
+                            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+                        break
+                    yield "data: {\"event\":\"heartbeat\"}\n\n"
+                    continue
+
+                if event["status"] == "complete":
+                    try:
+                        video_id = render_task.result()
+                    except Exception as exc:
+                        yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+                        return
+                    yield f"data: {json.dumps({'event': '[DONE]', 'video_id': video_id})}\n\n"
+                    return
+                elif event["status"] == "error":
+                    yield f"data: {json.dumps({'error': event['message']})}\n\n"
+                    return
+                else:
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+                if await request.is_disconnected():
+                    render_task.cancel()
+                    break
+
+    headers = {
+        "Cache-Control": "no-store",
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(event_generator(), headers=headers)
+
+
+@app.get("/video/{video_id}")
+async def download_video(video_id: str):
+    """Download a rendered MP4 video by ID."""
+    exporter = get_video_exporter()
+    path = exporter.get_video_path(video_id)
+    if not path:
+        raise HTTPException(status_code=404, detail="Video not found or expired")
+    meta = exporter.get_metadata(video_id) or {}
+    filename = f"animation_{video_id}.mp4"
+    return FileResponse(path, media_type="video/mp4", filename=filename)
+
+
+async def cleanup_expired_videos_once():
+    exporter = get_video_exporter()
+    exporter.cleanup_expired(VIDEO_DEFAULT_RETENTION_SECONDS)
+
+
+async def cleanup_expired_videos_loop():
+    while True:
+        cleanup_expired_videos_once()
+        await asyncio.sleep(VIDEO_CLEANUP_INTERVAL_SECONDS)
+
 
 @app.get("/", response_class=HTMLResponse)
 async def read_index(request: Request):

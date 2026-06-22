@@ -217,5 +217,7 @@ __MACOSX/
 **/ehthumbs.db
 credentials.json
 shared_html/
+exported_videos/
+temp_render/
 CLAUDE.md
 .claude/
