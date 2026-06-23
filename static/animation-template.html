@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="animation-duration" content="{{TOTAL_DURATION}}">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+<style>
+/* ============================================================
+   Continuous Flow Animation — Design System
+   No "scenes", just one continuous flowing timeline
+   ============================================================ */
+:root {
+  --w: {{SCENE_W}}px;
+  --h: {{SCENE_H}}px;
+  --c1: {{PRIMARY_COLOR}};
+  --c2: {{SECONDARY_COLOR}};
+  --c-bg: #FAFBFC;
+  --c-text: #0F172A;
+  --c-dim: #64748B;
+  --font: 'PingFang SC', 'Microsoft YaHei', 'MiSans', sans-serif;
+}
+
+* { margin:0; padding:0; box-sizing:border-box; }
+
+body {
+  width: var(--w); height: var(--h); overflow: hidden;
+  font-family: var(--font); background: var(--c-bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  position: relative;
+}
+
+/* ── Layer 0: Gradient background (continuously shifting) ── */
+.bg-gradient {
+  position: absolute; inset: 0; z-index: 0;
+  background: linear-gradient(160deg, #FAFBFC 0%, #F1F5F9 35%, #E8EEF4 70%, #F0F4FF 100%);
+
+}
+
+/* ── Layer 1: Glow orbs (slow drifting) ── */
+.glow-orb {
+  position: absolute; border-radius: 50%; filter: blur(80px); z-index: 0;
+  pointer-events: none;
+}
+.glow-orb.orb-1 { width: 650px; height: 650px; background: radial-gradient(circle, rgba(37,99,235,0.06) 0%, transparent 70%); }
+.glow-orb.orb-2 { width: 500px; height: 500px; background: radial-gradient(circle, rgba(124,58,237,0.05) 0%, transparent 70%); }
+.glow-orb.orb-3 { width: 400px; height: 400px; background: radial-gradient(circle, rgba(5,150,105,0.04) 0%, transparent 70%); }
+
+/* ── Layer 2: Grid texture ── */
+.bg-grid {
+  position: absolute; inset: 0; z-index: 0; pointer-events: none; opacity: 0.025;
+  background-image:
+    linear-gradient(rgba(0,0,0,0.15) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,0,0,0.15) 1px, transparent 1px);
+  background-size: 52px 52px;
+}
+
+/* ── Layer 3: Floating geometric shapes ── */
+.float-shape {
+  position: absolute; z-index: 1; pointer-events: none;
+  border-radius: 50%; opacity: 0;
+}
+.float-shape.circle { background: var(--c1); }
+.float-shape.ring { background: none; border: 2px solid var(--c2); }
+.float-shape.dot { background: var(--c2); }
+
+/* ── Layer 4: Orbiting rings ── */
+.orbit-container {
+  position: absolute; z-index: 1; pointer-events: none;
+  /* centered, sized by JS */
+}
+.orbit-ring {
+  position: absolute; border-radius: 50%;
+  border: 1.5px solid rgba(100,116,139,0.15);
+  top: 50%; left: 50%;
+}
+
+/* ── Content Stage ── */
+#stage {
+  position: absolute; inset: 0; z-index: 10;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;
+}
+
+/* ── Text blocks ── */
+.stage-title {
+  position: absolute;
+  font-family: var(--font);
+  font-size: clamp(3rem, 7vw, 6rem);
+  font-weight: 900; letter-spacing: -0.03em;
+  line-height: 1.1; text-align: center;
+  color: var(--c-text);
+  max-width: 80%;
+  opacity: 0;
+}
+.stage-title .hl { color: var(--c1); }
+
+.stage-body {
+  position: absolute;
+  font-family: var(--font);
+  font-size: 1.3rem; font-weight: 400;
+  line-height: 1.7; text-align: center;
+  color: var(--c-dim);
+  max-width: 60%;
+  opacity: 0;
+}
+
+.stage-big-number {
+  position: absolute;
+  font-family: var(--font);
+  font-size: 9rem; font-weight: 900;
+  letter-spacing: -0.05em;
+  color: var(--c1);
+  opacity: 0;
+}
+
+/* ── SVG visual area ── */
+.stage-visual {
+  position: absolute; opacity: 0;
+  display: flex; align-items: center; justify-content: center;
+}
+.stage-visual svg { overflow: visible; }
+
+/* ── Steps flow ── */
+.stage-steps {
+  position: absolute; display: flex; flex-direction: column; gap: 14px;
+  width: 65%; opacity: 0;
+}
+.step-row {
+  display: flex; align-items: center; gap: 16px;
+  padding: 12px 20px; background: rgba(255,255,255,0.85);
+  border-left: 4px solid var(--c1); border-radius: 0 4px 4px 0;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+  opacity: 0;
+}
+.step-num {
+  font-family: var(--font); font-size: 1.6rem; font-weight: 900;
+  color: var(--c1); min-width: 36px;
+}
+.step-label { font-size: 1.05rem; color: var(--c-text); }
+
+/* ── Comparison row ── */
+.stage-compare {
+  position: absolute; display: flex; align-items: center; gap: 50px; opacity: 0;
+}
+.compare-card {
+  text-align: center; padding: 28px 36px; border-radius: 4px; min-width: 200px;
+}
+.compare-card.before { background: rgba(220,38,38,0.06); border: 2px dashed rgba(220,38,38,0.3); }
+.compare-card.after  { background: rgba(5,150,105,0.08); border: 2px solid rgba(5,150,105,0.4); }
+.compare-label { font-size: 0.78rem; font-weight: 700; letter-spacing: 0.1em; margin-bottom: 10px; color: var(--c-dim); }
+.compare-text { font-size: 1.8rem; font-weight: 900; }
+
+/* ── Subtitle bar (persistent, bottom of screen) ── */
+#subtitle-bar {
+  position: absolute; bottom: 9%; left: 50%; transform: translateX(-50%);
+  z-index: 20; display: flex; flex-direction: column; align-items: center; gap: 4px;
+  pointer-events: none;
+}
+#subtitle-zh {
+  font-family: var(--font); font-size: 1.1rem; font-weight: 500;
+  color: #0F172A; background: rgba(255,255,255,0.82);
+  padding: 8px 24px; border-radius: 2px;
+  backdrop-filter: blur(6px); text-align: center; max-width: 75vw;
+}
+#subtitle-en {
+  font-family: var(--font); font-size: 0.9rem; font-weight: 400;
+  color: #64748B; background: rgba(255,255,255,0.60);
+  padding: 5px 20px; border-radius: 2px;
+  backdrop-filter: blur(4px); text-align: center; max-width: 75vw;
+}
+
+/* ── Accent line (used throughout) ── */
+.accent-bar {
+  position: absolute; height: 4px; background: var(--c1);
+  border-radius: 2px; opacity: 0;
+}
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════
+     PERMANENT BACKGROUND LAYERS (always moving)
+     ═══════════════════════════════════════════ -->
+<div class="bg-gradient" id="main-bg"></div>
+<div class="bg-grid" id="main-grid"></div>
+
+<div class="glow-orb orb-1" id="orb1"></div>
+<div class="glow-orb orb-2" id="orb2"></div>
+<div class="glow-orb orb-3" id="orb3"></div>
+
+<!-- Orbit rings -->
+<div class="orbit-container" id="orbit1" style="width:700px;height:700px;top:50%;left:50%;margin-left:-350px;margin-top:-350px;">
+  <div class="orbit-ring" style="width:700px;height:700px;margin-left:-350px;margin-top:-350px;"></div>
+</div>
+<div class="orbit-container" id="orbit2" style="width:500px;height:500px;top:50%;left:50%;margin-left:-250px;margin-top:-250px;">
+  <div class="orbit-ring" style="width:500px;height:500px;margin-left:-250px;margin-top:-250px;"></div>
+</div>
+
+<!-- Floating shapes (populated by GSAP) -->
+<div class="float-shape circle" id="fs1" style="width:50px;height:50px;top:15%;left:10%;"></div>
+<div class="float-shape ring"   id="fs2" style="width:90px;height:90px;top:65%;right:8%;"></div>
+<div class="float-shape dot"    id="fs3" style="width:18px;height:18px;top:22%;right:18%;"></div>
+<div class="float-shape circle" id="fs4" style="width:35px;height:35px;bottom:18%;left:12%;"></div>
+<div class="float-shape ring"   id="fs5" style="width:70px;height:70px;top:10%;right:22%;"></div>
+<div class="float-shape dot"    id="fs6" style="width:14px;height:14px;bottom:30%;right:30%;"></div>
+
+<!-- ═══════════════════════════════════════════
+     CONTENT STAGE (elements flow through here)
+     ═══════════════════════════════════════════ -->
+<div id="stage">
+  <!-- Elements are created and positioned by GSAP timeline -->
+</div>
+
+<!-- ═══════════════════════════════════════════
+     SUBTITLE BAR (persistent)
+     ═══════════════════════════════════════════ -->
+<div id="subtitle-bar">
+  <div id="subtitle-zh"></div>
+  <div id="subtitle-en"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     GSAP CONTINUOUS FLOW TIMELINE
+     ═══════════════════════════════════════════ -->
+<script>
+(function() {
+  var W = {{SCENE_W}}, H = {{SCENE_H}};
+  var C1 = '{{PRIMARY_COLOR}}', C2 = '{{SECONDARY_COLOR}}';
+  var durations = [{{SEGMENT_DURATIONS}}];
+
+  /* ═══ Master timeline ═══ */
+  var masterTL = gsap.timeline({ paused: false });
+  var t = 0; // current time cursor
+
+  /* ═══ Permanent ambient animations ═══ */
+
+  // Background gradient shift — runs entire duration
+  var totalDur = 0;
+  for (var i = 0; i < durations.length; i++) totalDur += durations[i];
+
+  // Subtle "camera breath" on the background grid
+  gsap.to('#main-grid', {
+    scale: 1.03, duration: totalDur * 0.5, ease: 'sine.inOut',
+    yoyo: true, repeat: 1
+  });
+
+  // Glow orbs — continuous slow drift
+  gsap.to('#orb1', { x: 60, y: -30, duration: totalDur * 0.4, ease: 'sine.inOut', yoyo: true, repeat: 1 });
+  gsap.to('#orb2', { x: -45, y: 40, duration: totalDur * 0.55, ease: 'sine.inOut', yoyo: true, repeat: 1 });
+  gsap.to('#orb3', { x: 25, y: -50, duration: totalDur * 0.65, ease: 'sine.inOut', yoyo: true, repeat: 1 });
+  // Orb colors shift over time
+  masterTL.to('#orb1', {
+    '--orb-color': 'rgba(5,150,105,0.08)', duration: totalDur * 0.5, ease: 'none'
+  }, 0);
+  masterTL.to('#orb2', {
+    '--orb-color': 'rgba(217,119,6,0.06)', duration: totalDur * 0.5, ease: 'none'
+  }, totalDur * 0.3);
+
+  // Floating shapes — continuous gentle drift
+  gsap.to('#fs1', { x: 30, y: -18, rotation: 10, duration: 9, ease: 'sine.inOut', yoyo: true, repeat: -1 });
+  gsap.to('#fs2', { x: -25, y: 20, rotation: -8, duration: 11, ease: 'sine.inOut', yoyo: true, repeat: -1 });
+  gsap.to('#fs3', { x: -15, y: -22, duration: 7, ease: 'sine.inOut', yoyo: true, repeat: -1 });
+  gsap.to('#fs4', { x: 22, y: 16, rotation: 12, duration: 10, ease: 'sine.inOut', yoyo: true, repeat: -1 });
+  gsap.to('#fs5', { x: -20, y: -14, rotation: -6, duration: 8, ease: 'sine.inOut', yoyo: true, repeat: -1 });
+  gsap.to('#fs6', { x: 18, y: -26, duration: 6.5, ease: 'sine.inOut', yoyo: true, repeat: -1 });
+  gsap.to('.float-shape', { opacity: 0.15, duration: 1.5, stagger: 0.15 }, 0);
+
+  // Orbit rings — continuous rotation
+  gsap.to('#orbit1', { rotation: 25, duration: totalDur, ease: 'none' });
+  gsap.to('#orbit2', { rotation: -18, duration: totalDur, ease: 'none' });
+  // Orbit color shift
+  masterTL.to('.orbit-ring', { borderColor: 'rgba(5,150,105,0.18)', duration: totalDur * 0.5, ease: 'none' }, totalDur * 0.2);
+
+  /* ═══ Content flow — elements enter, live, transform, exit ═══ */
+
+  // Helper: create an element and add it to the stage
+  function el(tag, cls, html, styles) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (html) e.innerHTML = html;
+    if (styles) for (var k in styles) e.style[k] = styles[k];
+    document.getElementById('stage').appendChild(e);
+    return e;
+  }
+
+  // Helper: remove element after a delay (called at specific time)
+  function removeAt(e, atTime) {
+    masterTL.call(function() {
+      if (e && e.parentNode) e.parentNode.removeChild(e);
+    }, null, atTime);
+  }
+
+  // Helper: animate element in with bounce, out with fade
+  function enterBounce(target, atTime, fromProps, toProps) {
+    gsap.set(target, fromProps || { opacity: 0, scale: 0.85, y: 40 });
+    masterTL.to(target, Object.assign({ opacity: 1, scale: 1, y: 0, duration: 0.8, ease: 'back.out(1.5)' }, toProps || {}), atTime);
+  }
+
+  function exitFade(target, atTime) {
+    masterTL.to(target, { opacity: 0, scale: 0.92, y: -20, duration: 0.5, ease: 'power2.in' }, atTime);
+  }
+
+  // ═══════════════════════════════════════════
+  // SEGMENT DATA (filled by LLM)
+  // Each segment: { title, body, bigNum, visualSVG, steps, compare, subZh, subEn, styles }
+  // ═══════════════════════════════════════════
+  var segments = [
+    {{SEGMENT_0}},
+    {{SEGMENT_1}},
+    {{SEGMENT_2}},
+    {{SEGMENT_3}},
+    {{SEGMENT_4}}
+  ];
+
+  // Build the continuous flow
+  var segElements = []; // track elements per segment for cleanup
+  var currentGlowColor = 'rgba(220,38,38,0.06)';
+
+  for (var si = 0; si < segments.length; si++) {
+    var seg = segments[si];
+    var dur = durations[si];
+    var segStart = t;
+    var segEls = [];
+    segElements.push(segEls);
+
+    // === Phase: ENTRANCE (at segStart → segStart + 1.2s) ===
+
+    // Accent bar sweeps in
+    var bar = el('div', 'accent-bar', '', {
+      width: '100px', top: '18%', left: '50%', marginLeft: '-50px',
+      background: seg.titleColor || C1
+    });
+    masterTL.fromTo(bar, { scaleX: 0, opacity: 0 }, { scaleX: 1, opacity: 1, duration: 0.5, ease: 'power3.out' }, segStart);
+    segEls.push(bar);
+
+    // Big number (if present)
+    if (seg.bigNum) {
+      var bn = el('div', 'stage-big-number', seg.bigNum, {
+        top: '28%', left: '50%', transform: 'translateX(-50%)',
+        color: seg.titleColor || C1
+      });
+      masterTL.fromTo(bn,
+        { scale: 0.3, opacity: 0 },
+        { scale: 1, opacity: 1, duration: 0.9, ease: 'elastic.out(1, 0.4)' },
+        segStart + 0.1
+      );
+      // Gentle pulse during stay
+      masterTL.to(bn, { scale: 1.06, duration: dur * 0.6, ease: 'sine.inOut', yoyo: true, repeat: 1 }, segStart + 1.2);
+      segEls.push(bn);
+    }
+
+    // Title
+    if (seg.title) {
+      var titleEl = el('div', 'stage-title', seg.title, {
+        top: seg.bigNum ? '55%' : '32%', left: '50%', transform: 'translateX(-50%)'
+      });
+      // Kinetic: characters animate in with stagger via SplitText-like approach
+      // (We animate the whole element but with a satisfying bounce)
+      masterTL.fromTo(titleEl,
+        { y: 60, opacity: 0, scale: 0.9 },
+        { y: 0, opacity: 1, scale: 1, duration: 0.85, ease: 'back.out(1.4)' },
+        segStart + (seg.bigNum ? 0.5 : 0.15)
+      );
+      // Subtle float during stay
+      masterTL.to(titleEl, { y: -8, duration: dur * 0.4, ease: 'sine.inOut', yoyo: true, repeat: 1 }, segStart + 1.5);
+      segEls.push(titleEl);
+    }
+
+    // SVG Visual
+    if (seg.visualSVG) {
+      var vis = el('div', 'stage-visual', seg.visualSVG, {
+        top: '48%', left: '50%', transform: 'translate(-50%, -50%)'
+      });
+      masterTL.fromTo(vis,
+        { scale: 0.7, opacity: 0 },
+        { scale: 1, opacity: 1, duration: 0.7, ease: 'power3.out' },
+        segStart + 0.6
+      );
+      // Animate SVG strokes
+      vis.querySelectorAll('[data-draw]').forEach(function(s, i) {
+        var len = s.getTotalLength ? s.getTotalLength() : 200;
+        gsap.set(s, { strokeDasharray: len, strokeDashoffset: len });
+        masterTL.to(s, { strokeDashoffset: 0, duration: 1.2, ease: 'power2.inOut' }, segStart + 0.9 + i * 0.2);
+      });
+      // Pulse
+      masterTL.to(vis, { scale: 1.05, duration: dur * 0.4, ease: 'sine.inOut', yoyo: true, repeat: 1 }, segStart + 1.8);
+      segEls.push(vis);
+    }
+
+    // Steps (staggered)
+    if (seg.steps && seg.steps.length) {
+      var stepsWrap = el('div', 'stage-steps', '', {
+        top: '38%', left: '50%', transform: 'translateX(-50%)'
+      });
+      masterTL.set(stepsWrap, { opacity: 0 });
+      masterTL.to(stepsWrap, { opacity: 1, duration: 0.3 }, segStart + 0.5);
+      segEls.push(stepsWrap);
+
+      seg.steps.forEach(function(step, i) {
+        var row = document.createElement('div');
+        row.className = 'step-row';
+        row.innerHTML = '<span class="step-num">' + (i + 1) + '</span><span class="step-label">' + step + '</span>';
+        stepsWrap.appendChild(row);
+        masterTL.fromTo(row,
+          { x: -35, opacity: 0 },
+          { x: 0, opacity: 1, duration: 0.5, ease: 'power3.out' },
+          segStart + 0.7 + i * 0.22
+        );
+      });
+    }
+
+    // Comparison (if present)
+    if (seg.compareBefore) {
+      var comp = el('div', 'stage-compare', '', {
+        top: '45%', left: '50%', transform: 'translate(-50%, -50%)'
+      });
+      comp.innerHTML =
+        '<div class="compare-card before"><div class="compare-label">' + (seg.compareLabelBefore || '旧认知') + '</div><div class="compare-text">' + seg.compareBefore + '</div></div>' +
+        (seg.compareArrow || '<svg width="40" height="40" viewBox="0 0 40 40"><path d="M5 20h25M22 10l10 10-10 10" stroke="currentColor" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>') +
+        '<div class="compare-card after"><div class="compare-label">' + (seg.compareLabelAfter || '真相') + '</div><div class="compare-text">' + seg.compareAfter + '</div></div>';
+      masterTL.fromTo(comp,
+        { y: 40, opacity: 0, scale: 0.85 },
+        { y: 0, opacity: 1, scale: 1, duration: 0.9, ease: 'back.out(1.3)' },
+        segStart + 0.8
+      );
+      segEls.push(comp);
+    }
+
+    // Body text
+    if (seg.body) {
+      var bodyEl = el('div', 'stage-body', seg.body, {
+        top: '70%', left: '50%', transform: 'translateX(-50%)'
+      });
+      masterTL.fromTo(bodyEl,
+        { y: 20, opacity: 0 },
+        { y: 0, opacity: 1, duration: 0.6, ease: 'power2.out' },
+        segStart + 1.0
+      );
+      segEls.push(bodyEl);
+    }
+
+    // Subtitle (persistent bar, just change text)
+    if (seg.subZh) {
+      masterTL.call(function() {
+        document.getElementById('subtitle-zh').textContent = seg.subZh;
+        document.getElementById('subtitle-en').textContent = seg.subEn || '';
+      }, null, segStart + 0.9);
+      masterTL.fromTo('#subtitle-bar',
+        { y: 10, opacity: 0 },
+        { y: 0, opacity: 1, duration: 0.4, ease: 'power2.out' },
+        segStart + 0.9
+      );
+    }
+
+    // === Phase: EXIT (at segStart + dur - 0.8s) ===
+    // Current segment elements transform/shrink/move aside
+    if (si < segments.length - 1) {
+      var exitTime = segStart + dur - 0.7;
+
+      // Title slides up and fades
+      if (seg.title && titleEl) {
+        exitFade(titleEl, exitTime);
+      }
+      // Visual shrinks
+      if (seg.visualSVG && vis) {
+        masterTL.to(vis, { scale: 0.8, opacity: 0, duration: 0.5, ease: 'power2.in' }, exitTime);
+      }
+      // Steps/stepsWrap fade
+      if (seg.steps && stepsWrap) {
+        masterTL.to(stepsWrap, { opacity: 0, y: 15, duration: 0.4, ease: 'power2.in' }, exitTime);
+      }
+      // Comparison fade
+      if (seg.compareBefore && comp) {
+        exitFade(comp, exitTime);
+      }
+      // Body fade
+      if (seg.body && bodyEl) {
+        exitFade(bodyEl, exitTime);
+      }
+      // Big number fade
+      if (seg.bigNum && bn) {
+        exitFade(bn, exitTime);
+      }
+      // Bar fade
+      if (bar) {
+        masterTL.to(bar, { scaleX: 0, opacity: 0, duration: 0.4, ease: 'power2.in' }, exitTime + 0.1);
+      }
+
+      // Transition: the glow orb shifts color between segments
+      var nextSeg = segments[si + 1];
+      if (nextSeg.titleColor) {
+        masterTL.to('#orb1', {
+          '--temp': 'x', duration: 1.0, ease: 'power2.inOut',
+          // Note: CSS custom property animation via GSAP needs attr:{}
+        }, exitTime);
+      }
+    }
+
+    // Schedule element cleanup
+    (function(els, removeDelay) {
+      masterTL.call(function() {
+        els.forEach(function(e) {
+          if (e && e.parentNode) e.parentNode.removeChild(e);
+        });
+      }, null, removeDelay);
+    })(segEls, segStart + dur + 0.5);
+
+    t += dur;
+  }
+
+  /* ═══ Final hold ═══ */
+  masterTL.call(function() {
+    document.getElementById('subtitle-zh').textContent = '';
+    document.getElementById('subtitle-en').textContent = '';
+  }, null, t);
+  // Gentle fade of everything
+  masterTL.to('#stage > *', { opacity: 0, duration: 0.6 }, t - 0.3);
+  masterTL.to('#subtitle-bar', { opacity: 0, duration: 0.4 }, t - 0.3);
+
+  /* ═══ Register for video export ═══ */
+  window.__timelines = [masterTL];
+  window.__totalDuration = t;
+})();
+</script>
+</body>
+</html>

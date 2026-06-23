@@ -1078,6 +1078,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function appendAnimationPlayer(htmlContent, topic) {
         Logger.info('Appending animation player:', topic);
+
+        // === 客户端 HTML 后处理增强 ===
+        try {
+            htmlContent = ZSJPostProcess.enhance(htmlContent, {
+                injectCSS: true,
+                injectNoise: true,
+                injectGSAPPatch: true,
+                fixOverflow: true
+            });
+        } catch (err) {
+            Logger.warn('Post-process enhancement failed:', err);
+        }
+
         const node = templates.player.content.cloneNode(true);
         const playerElement = node.firstElementChild;
         playerElement.querySelectorAll('[data-translate-key]').forEach(el => {
