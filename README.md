@@ -56,6 +56,7 @@
 | --- | --- |
 | 概念动画生成 | 输入一个知识点，生成可播放的动态网页动画 |
 | 论文解释 | 上传 PDF 论文，生成论文动画讲解页面 |
+| 两阶段生成 | 先生成结构化五幕文案，审阅编辑后再生成动画（问题冲突型叙事） |
 | 指定论文重点 | 可聚焦章节、术语、模型结构、实验结果或结论 |
 | SSE 流式输出 | 后端实时推送模型输出，前端逐 token 展示生成过程 |
 | 自动渲染 | 自动提取模型返回的 HTML，并放入 sandbox iframe 播放 |
@@ -230,7 +231,9 @@ docker run --rm -p 8000:8000 -v "$(pwd)/credentials.json:/app/credentials.json:r
 | `GET` | `/` | Web 页面入口 |
 | `GET` | `/config` | 获取公开配置，例如是否需要暗号 |
 | `POST` | `/verify-passphrase` | 校验访问暗号 |
-| `POST` | `/generate` | 根据主题生成动画，返回 SSE 流 |
+| `POST` | `/generate` | 根据主题生成动画，返回 SSE 流（一步到位，保留兼容） |
+| `POST` | `/generate/copy` | 阶段一：生成结构化五幕文案 JSON，返回 SSE 流 |
+| `POST` | `/generate/animation` | 阶段二：根据文案 JSON 生成动画 HTML，返回 SSE 流 |
 | `POST` | `/paper/generate` | 上传 PDF 并生成论文解释动画，返回 SSE 流 |
 | `POST` | `/share` | 创建 HTML 分享链接 |
 | `GET` | `/share/{share_id}` | 访问分享页面 |

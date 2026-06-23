@@ -211,6 +211,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 # custome
+logs/
 __MACOSX/
 **/.DS_Store
 **/Thumbs.db

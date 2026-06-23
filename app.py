@@ -3,8 +3,10 @@ import base64
 import html
 import io
 import json
+import logging
 import os
 import secrets
+import time
 from datetime import datetime, timedelta
 from typing import AsyncGenerator, List, Optional, Dict, Any
 from urllib.parse import parse_qs
@@ -21,10 +23,14 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from pypdf import PdfReader
 from video_exporter import get_video_exporter
+from logger import get_logger, log_llm_request, log_llm_response_start, log_llm_response_end, log_llm_error
+
 try:
     import google.generativeai as genai
 except ModuleNotFoundError:
     from google import genai
+
+logger = get_logger(__name__)
 # -----------------------------------------------------------------------
 # 0. 配置
 # -----------------------------------------------------------------------
@@ -80,40 +86,40 @@ DURATION_SECONDS_HINT = {
 }
 
 
-def debug_llm(label: str, value=None):
+def _debug_llm(label: str, value=None):
+    """兼容旧的 debug_llm 调用 —— 现在走统一日志系统."""
     if not ENABLE_DEBUG_OUTPUT:
         return
-    print(f"\n===== LLM DEBUG: {label} =====", flush=True)
+    logger.debug("===== LLM DEBUG: %s =====", label)
     if value is not None:
         if isinstance(value, (dict, list)):
-            print(json.dumps(value, ensure_ascii=False, indent=2), flush=True)
+            logger.debug(json.dumps(value, ensure_ascii=False, indent=2))
         else:
-            print(value, flush=True)
-    print(f"===== END LLM DEBUG: {label} =====\n", flush=True)
+            logger.debug(str(value))
+    logger.debug("===== END LLM DEBUG: %s =====", label)
 
 
-def debug_conversation(provider: str, model: str, messages: List[dict], settings: Dict[str, Any]):
-    debug_llm("conversation request", {
-        "provider": provider,
-        "model": model,
-        "settings": settings,
-        "messages": messages,
-    })
-
-
-def debug_response_start(provider: str):
-    debug_llm("conversation response started", {"provider": provider})
-
-
-def debug_response_chunk(chunk: str):
-    if not ENABLE_DEBUG_OUTPUT or not chunk:
-        return
-    print(chunk, end="", flush=True)
-
-
-def debug_response_end():
+def _debug_conversation(provider: str, model: str, messages: List[dict], settings: Dict[str, Any]):
     if ENABLE_DEBUG_OUTPUT:
-        print("\n===== END LLM DEBUG: conversation response =====\n", flush=True)
+        log_llm_request(provider, model, messages, settings)
+
+
+def _debug_response_start(provider: str):
+    if ENABLE_DEBUG_OUTPUT:
+        log_llm_response_start(provider)
+
+
+def _debug_response_chunk(chunk: str):
+    # 流式 chunk 直接输出到控制台，不进入日志文件（避免 I/O 风暴）
+    if ENABLE_DEBUG_OUTPUT and chunk:
+        import sys
+        sys.stdout.write(chunk)
+        sys.stdout.flush()
+
+
+def _debug_response_end():
+    if ENABLE_DEBUG_OUTPUT:
+        log_llm_response_end()
 
 
 class ThoughtProcessFilter:
@@ -216,11 +222,76 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type", "Authorization"],
 )
+
+
+# ── HTTP 请求日志中间件 ──
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """记录所有 HTTP 请求及响应状态/耗时."""
+    start_time = time.time()
+    logger.info("→ %s %s | client=%s", request.method, request.url.path,
+                request.client.host if request.client else "unknown")
+
+    try:
+        response = await call_next(request)
+    except Exception:
+        elapsed = (time.time() - start_time) * 1000
+        logger.exception("✗ %s %s | 耗时=%.0fms | 未捕获异常",
+                         request.method, request.url.path, elapsed)
+        raise
+
+    elapsed = (time.time() - start_time) * 1000
+    status_code = response.status_code
+    if status_code >= 500:
+        logger.error("✗ %s %s → %s | 耗时=%.0fms",
+                     request.method, request.url.path, status_code, elapsed)
+    elif status_code >= 400:
+        logger.warning("← %s %s → %s | 耗时=%.0fms",
+                      request.method, request.url.path, status_code, elapsed)
+    else:
+        logger.info("← %s %s → %s | 耗时=%.0fms",
+                   request.method, request.url.path, status_code, elapsed)
+    return response
+
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 class ChatRequest(BaseModel):
     topic: str
     history: Optional[List[dict]] = None
+    settings: Optional[Dict[str, Any]] = None
+
+
+# ── Two-stage generation models ──
+
+class CopyAct(BaseModel):
+    act: int
+    name: str
+    goal: str
+    duration_hint: int
+    method_used: str
+    narration: str
+    narration_en: str = ""
+    visual_description: str
+    on_screen_text: str = ""
+
+
+class CopySchema(BaseModel):
+    narrative_type: str = "problem_conflict"
+    title: str
+    visual_style: str = "cinematic"
+    color_palette: str = ""
+    total_duration_hint: int = 60
+    acts: List[CopyAct] = []
+
+
+class CopyRequest(BaseModel):
+    topic: str
+    settings: Optional[Dict[str, Any]] = None
+
+
+class AnimationRequest(BaseModel):
+    copy_json: Dict[str, Any]
     settings: Optional[Dict[str, Any]] = None
 
 
@@ -287,6 +358,134 @@ def build_generation_setting_instructions(settings: Optional[Dict[str, Any]] = N
     }
 
 
+def build_copy_system_prompt(topic: str, settings: Optional[Dict[str, Any]] = None) -> str:
+    """Build the 5-act problem-conflict narrative copy generation prompt."""
+    settings = settings or {}
+    setting_instructions = build_generation_setting_instructions(settings)
+    duration_sec = DURATION_SECONDS_HINT.get(settings.get("duration", "medium"), 60)
+
+    prompt = f"""你是一个采用「问题冲突型」叙事结构的科学动画编剧。
+
+## 用户概念
+{topic}
+
+## 生成规格
+- 视觉风格：{setting_instructions['style']}
+- 总时长：约 {duration_sec} 秒
+- 画幅：{setting_instructions['ratio']}
+- 讲解深度：{setting_instructions['depth']}
+- 旁白要求：{setting_instructions['narration']}
+- 字幕要求：{setting_instructions['bilingual']}
+
+## 叙事结构约束
+你必须严格按照以下五幕结构来组织文案，每幕一个场景：
+
+**第一幕·认知爆破**（3秒抓注意力）
+- 手法四选一：假设危机 / 反常识 / 数据震撼 / 身份代入
+- 要求：第一句话就要让观众停下来
+- 时长：约占总时长 10-15%
+
+**第二幕·延迟满足**（制造疑问，不给答案）
+- 手法：强化错误认知 + 暗示答案相反 + 留下更大疑问
+- 要求：让观众产生「到底怎么回事」的焦虑感
+- 时长：约占总时长 15-20%
+
+**第三幕·层层揭秘**（保持观看，逐步解锁）
+- 手法：一问一答 + 连续小反转 + 信息量逐级递增
+- 要求：每揭示一层就抛出一个新问题，形成信息阶梯
+- 时长：约占总时长 30-40%
+
+**第四幕·高潮揭晓**（产生「原来如此」）
+- 手法：颠覆原有认知 + 揭示核心原理 + 放大对比
+- 要求：用一个清晰的视觉类比或逻辑链条完成最终解释
+- 时长：约占总时长 15-20%
+
+**第五幕·记忆钉**（留下传播点）
+- 手法：一句话总结 + 金句化表达 + 哲理升华
+- 要求：让观众看完后能复述给别人的一句话
+- 时长：约占总时长 10-15%
+
+## 输出格式（纯 JSON，不要任何其他内容）
+{{
+  "narrative_type": "problem_conflict",
+  "title": "动画标题",
+  "visual_style": "{settings.get('style', 'cinematic')}",
+  "color_palette": "推荐配色方案描述",
+  "total_duration_hint": {duration_sec},
+  "acts": [
+    {{
+      "act": 1,
+      "name": "认知爆破",
+      "goal": "3秒抓住注意力",
+      "duration_hint": 8,
+      "method_used": "反常识",
+      "narration": "中文旁白文字",
+      "narration_en": "English narration",
+      "visual_description": "具体画面描述：颜色、构图、动效方向、镜头运动",
+      "on_screen_text": "画面上展示的关键大字"
+    }}
+  ]
+}}
+
+## 要求
+- 旁白口语化，适合朗读，中文每句不超过 35 字
+- 英文旁白为中文的准确翻译
+- 画面描述具体可执行，与对应幕的叙事目标一致
+- on_screen_text 是画面上展示的大字/金句，与旁白互补不重复
+- 输出纯 JSON，不要 markdown 代码块包裹"""
+    return prompt
+
+
+def build_animation_from_copy_system_prompt(copy_json: Dict[str, Any], settings: Optional[Dict[str, Any]] = None) -> str:
+    """Build the animation generation prompt that takes structured copy as input."""
+    settings = settings or {}
+    setting_instructions = build_generation_setting_instructions(settings)
+    duration_sec = copy_json.get("total_duration_hint", DURATION_SECONDS_HINT.get(settings.get("duration", "medium"), 60))
+
+    copy_text = json.dumps(copy_json, ensure_ascii=False, indent=2)
+
+    prompt = f"""你是一个动画导演和前端工程师。请根据以下「问题冲突型」五幕文案生成一个精美的 HTML 动画。
+
+## 五幕文案
+{copy_text}
+
+## 生成规格
+- 风格：{setting_instructions['style']}
+- 时长：约 {duration_sec} 秒
+- 画幅：{setting_instructions['ratio']}
+- 容器尺寸：{setting_instructions['resolution']}
+- 讲解深度：{setting_instructions['depth']}
+- 旁白：{setting_instructions['narration']}
+- 字幕：{setting_instructions['bilingual']}
+- 数学公式：{setting_instructions['mathjax']}
+
+## 五幕视觉风格指引
+- 第一幕「认知爆破」：大字体、高对比度、快速切入、视觉冲击力强
+- 第二幕「延迟满足」：悬疑色调、慢镜头、信息留白、制造视觉悬念
+- 第三幕「层层揭秘」：信息图表风格、分层展开、逐渐提高信息量
+- 第四幕「高潮揭晓」：对比画面、关键概念放大、色彩转变（如从冷到暖）
+- 第五幕「记忆钉」：回归安静、金句居中放大、收束感、logo 般定格
+
+## 文字呈现要求
+- 每个场景的 on_screen_text 必须作为画面主体文字呈现（大字、突出）
+- 旁白 narration 作为字幕展示在画面底部（小字、低调）
+- 两者视觉层次要区分——主文字大而突出，字幕小而低调
+- 如果有 narration_en，与中文旁白一起作为双语字幕展示
+
+## 其他要求
+- 严格按照文案中的场景顺序和 duration_hint 来组织动画节奏
+- 不需要任何互动按钮，直接开始播放
+- 使用和谐好看的浅色配色方案，使用丰富的视觉元素
+- **请保证任何一个元素都在指定分辨率的容器中被摆在了正确的位置**
+- 视频导出兼容性：
+  - 在 <head> 中添加 <meta name="animation-duration" content="{duration_sec}"> 声明动画总秒数
+  - 强烈建议使用 GSAP（CDN: https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js）创建动画时间线
+  - 如果使用 GSAP，请将时间线注册到 window.__timelines 对象上
+  - 所有动画必须自动播放，不依赖用户交互，不依赖随机数或当前时间
+- html+css+js+svg，放进一个 html 里，直接只给出 html，不用其它总结"""
+    return prompt
+
+
 # -----------------------------------------------------------------------
 # 2. 核心：流式生成器 (现在会使用 history)
 # -----------------------------------------------------------------------
@@ -304,13 +503,16 @@ async def llm_event_stream(
     if model is None:
         model = MODEL
 
-    debug_llm("request received", {
-        "provider": "openai-compatible",
-        "model": model,
-        "topic": topic,
-        "history": history,
-        "settings": settings,
-    })
+    logger.info("LLM 请求 | topic=%s | model=%s | history_count=%d",
+                topic[:100], model, len(history))
+    if ENABLE_DEBUG_OUTPUT:
+        _debug_llm("request received", {
+            "provider": "openai-compatible",
+            "model": model,
+            "topic": topic,
+            "history": history,
+            "settings": settings,
+        })
 
     # The system prompt is now more focused
     duration_sec = DURATION_SECONDS_HINT.get(settings.get("duration", "medium"), 60)
@@ -342,7 +544,7 @@ html+css+js+svg，放进一个html里，直接只给出html，不用其它总结
         {"role": "user", "content": topic},
     ]
 
-    debug_conversation("openai-compatible", model, messages, settings)
+    _debug_conversation("openai-compatible", model, messages, settings)
 
     try:
         response = await client.chat.completions.create(
@@ -352,11 +554,11 @@ html+css+js+svg，放进一个html里，直接只给出html，不用其它总结
             temperature=0.8, 
         )
     except OpenAIError as e:
-        debug_llm("openai-compatible error", str(e))
+        log_llm_error("openai-compatible", str(e))
         yield f"data: {json.dumps({'error': str(e)})}\n\n"
         return
 
-    debug_response_start("openai-compatible")
+    _debug_response_start("openai-compatible")
     thought_filter = ThoughtProcessFilter()
     async for chunk in response:
         # 某些 OpenAI-compatible / OpenRouter 流式块可能没有 choices 或没有 content
@@ -377,20 +579,20 @@ html+css+js+svg，放进一个html里，直接只给出html，不用其它总结
         if not visible_token:
             continue
 
-        debug_response_chunk(visible_token)
+        _debug_response_chunk(visible_token)
         payload = json.dumps({"token": visible_token}, ensure_ascii=False)
         yield f"data: {payload}\n\n"
         await asyncio.sleep(0.001)
 
     remaining_token = thought_filter.flush()
     if remaining_token:
-        debug_response_chunk(remaining_token)
+        _debug_response_chunk(remaining_token)
         payload = json.dumps({"token": remaining_token}, ensure_ascii=False)
         yield f"data: {payload}\n\n"
 
-    debug_response_end()
+    _debug_response_end()
 
-    debug_llm("stream complete", "[DONE]")
+    logger.info("LLM 流式生成完成")
     yield 'data: {"event":"[DONE]"}\n\n'
 
 
@@ -405,6 +607,7 @@ def parse_settings_form(settings: str) -> Dict[str, Any]:
 async def extract_pdf_text(pdf_file: UploadFile) -> Dict[str, Any]:
     filename = pdf_file.filename or "paper.pdf"
     content_type = pdf_file.content_type or ""
+    logger.info("PDF 提取开始 | filename=%s | size=%d", filename, pdf_file.size or 0)
     if not filename.lower().endswith(".pdf") and "pdf" not in content_type.lower():
         raise ValueError("请上传 PDF 文件")
 
@@ -417,6 +620,7 @@ async def extract_pdf_text(pdf_file: UploadFile) -> Dict[str, Any]:
     try:
         reader = PdfReader(io.BytesIO(content))
     except Exception as exc:
+        logger.exception("PDF 解析失败 | filename=%s", filename)
         raise ValueError("PDF 解析失败，请确认文件未损坏") from exc
 
     page_texts = []
@@ -428,12 +632,15 @@ async def extract_pdf_text(pdf_file: UploadFile) -> Dict[str, Any]:
 
     paper_text = "\n\n".join(page_texts).strip()
     if not paper_text:
+        logger.warning("PDF 未提取到文字 | filename=%s | pages=%d", filename, len(reader.pages))
         raise ValueError("未能从 PDF 中提取文字，暂不支持扫描版或图片型论文")
 
     truncated = len(paper_text) > MAX_PAPER_TEXT_CHARS
     if truncated:
         paper_text = paper_text[:MAX_PAPER_TEXT_CHARS]
 
+    logger.info("PDF 提取完成 | filename=%s | pages=%d | chars=%d | truncated=%s",
+                filename, len(reader.pages), len(paper_text), truncated)
     return {
         "filename": filename,
         "text": paper_text,
@@ -496,7 +703,7 @@ async def paper_llm_event_stream(
         {"role": "user", "content": f"论文文件名：{filename}\n\n论文内容：\n{paper_text}"},
     ]
 
-    debug_conversation("openai-compatible", model, messages, settings)
+    _debug_conversation("openai-compatible", model, messages, settings)
 
     try:
         response = await client.chat.completions.create(
@@ -506,11 +713,11 @@ async def paper_llm_event_stream(
             temperature=0.8,
         )
     except OpenAIError as e:
-        debug_llm("openai-compatible error", str(e))
+        log_llm_error("openai-compatible", str(e))
         yield f"data: {json.dumps({'error': str(e)})}\n\n"
         return
 
-    debug_response_start("openai-compatible")
+    _debug_response_start("openai-compatible")
     thought_filter = ThoughtProcessFilter()
     async for chunk in response:
         choices = getattr(chunk, "choices", None)
@@ -530,20 +737,152 @@ async def paper_llm_event_stream(
         if not visible_token:
             continue
 
-        debug_response_chunk(visible_token)
+        _debug_response_chunk(visible_token)
         payload = json.dumps({"token": visible_token}, ensure_ascii=False)
         yield f"data: {payload}\n\n"
         await asyncio.sleep(0.001)
 
     remaining_token = thought_filter.flush()
     if remaining_token:
-        debug_response_chunk(remaining_token)
+        _debug_response_chunk(remaining_token)
         payload = json.dumps({"token": remaining_token}, ensure_ascii=False)
         yield f"data: {payload}\n\n"
 
-    debug_response_end()
-    debug_llm("paper stream complete", "[DONE]")
+    _debug_response_end()
+    logger.info("论文流式生成完成")
     yield 'data: {"event":"[DONE]"}\n\n'
+
+
+# ── Two-stage streaming generators ──
+
+async def copy_llm_event_stream(
+    topic: str,
+    model: str = None,
+    settings: Optional[Dict[str, Any]] = None,
+) -> AsyncGenerator[str, None]:
+    """Stage 1: Generate structured 5-act copy as streaming JSON."""
+    settings = settings or {}
+    if model is None:
+        model = MODEL
+
+    system_prompt = build_copy_system_prompt(topic, settings)
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"请为以下概念生成五幕文案：{topic}"},
+    ]
+
+    _debug_conversation("openai-compatible", model, messages, settings)
+
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            stream=True,
+            temperature=0.8,
+        )
+    except OpenAIError as e:
+        log_llm_error("openai-compatible", f"copy generation: {e}")
+        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        return
+
+    _debug_response_start("openai-compatible")
+    thought_filter = ThoughtProcessFilter()
+    async for chunk in response:
+        choices = getattr(chunk, "choices", None)
+        if not choices:
+            continue
+        choice = choices[0]
+        delta = getattr(choice, "delta", None)
+        if not delta:
+            continue
+        token = getattr(delta, "content", None) or ""
+        if not token:
+            continue
+
+        visible_token = thought_filter.feed(token)
+        if not visible_token:
+            continue
+
+        _debug_response_chunk(visible_token)
+        payload = json.dumps({"token": visible_token}, ensure_ascii=False)
+        yield f"data: {payload}\n\n"
+        await asyncio.sleep(0.001)
+
+    remaining_token = thought_filter.flush()
+    if remaining_token:
+        _debug_response_chunk(remaining_token)
+        payload = json.dumps({"token": remaining_token}, ensure_ascii=False)
+        yield f"data: {payload}\n\n"
+
+    _debug_response_end()
+    logger.info("文案流式生成完成")
+    yield 'data: {"event":"[DONE]"}\n\n'
+
+
+async def animation_from_copy_llm_event_stream(
+    copy_json: Dict[str, Any],
+    model: str = None,
+    settings: Optional[Dict[str, Any]] = None,
+) -> AsyncGenerator[str, None]:
+    """Stage 2: Generate HTML animation from structured copy."""
+    settings = settings or {}
+    if model is None:
+        model = MODEL
+
+    system_prompt = build_animation_from_copy_system_prompt(copy_json, settings)
+    copy_title = copy_json.get("title", "动画")
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"请根据以上五幕文案生成动画：{copy_title}"},
+    ]
+
+    _debug_conversation("openai-compatible", model, messages, settings)
+
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            stream=True,
+            temperature=0.8,
+        )
+    except OpenAIError as e:
+        log_llm_error("openai-compatible", f"animation-from-copy: {e}")
+        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        return
+
+    _debug_response_start("openai-compatible")
+    thought_filter = ThoughtProcessFilter()
+    async for chunk in response:
+        choices = getattr(chunk, "choices", None)
+        if not choices:
+            continue
+        choice = choices[0]
+        delta = getattr(choice, "delta", None)
+        if not delta:
+            continue
+        token = getattr(delta, "content", None) or ""
+        if not token:
+            continue
+
+        visible_token = thought_filter.feed(token)
+        if not visible_token:
+            continue
+
+        _debug_response_chunk(visible_token)
+        payload = json.dumps({"token": visible_token}, ensure_ascii=False)
+        yield f"data: {payload}\n\n"
+        await asyncio.sleep(0.001)
+
+    remaining_token = thought_filter.flush()
+    if remaining_token:
+        _debug_response_chunk(remaining_token)
+        payload = json.dumps({"token": remaining_token}, ensure_ascii=False)
+        yield f"data: {payload}\n\n"
+
+    _debug_response_end()
+    logger.info("动画（从文案）流式生成完成")
+    yield 'data: {"event":"[DONE]"}\n\n'
+
 
 # -----------------------------------------------------------------------
 # 3. 路由 (CHANGED: Now a POST request)
@@ -556,7 +895,9 @@ async def get_public_config():
 @app.post("/verify-passphrase")
 async def verify_passphrase(passphrase_request: PassphraseRequest):
     if ACCESS_PASSPHRASES and passphrase_request.passphrase not in ACCESS_PASSPHRASES:
+        logger.warning("暗号验证失败")
         raise HTTPException(status_code=403, detail="暗号错误")
+    logger.info("暗号验证通过")
     return {"ok": True}
 
 
@@ -779,6 +1120,8 @@ async def create_share_link(share_request: ShareRequest, request: Request):
     shared_html_links[share_id] = record
     save_share_to_disk(share_id, record)
     share_url = str(request.url_for("read_shared_html", share_id=share_id))
+    logger.info("分享链接已创建 | share_id=%s | expires_in=%s | url=%s",
+                share_id, share_request.expiresIn, share_url)
     return {
         "url": share_url,
         "qrCode": create_qr_data_url(share_url),
@@ -812,6 +1155,25 @@ async def verify_shared_html(share_id: str, request: Request):
     return HTMLResponse(shared["html"])
 
 
+class LogErrorRequest(BaseModel):
+    errors: List[Dict[str, Any]] = []
+
+
+@app.post("/api/log-error")
+async def log_frontend_error(error_request: LogErrorRequest):
+    """接收前端上报的错误日志，写入后端日志文件."""
+    for err in error_request.errors:
+        logger.error(
+            "前端错误 | 消息=%s | URL=%s | UA=%s | 时间=%s | 堆栈=%s",
+            err.get("message", "unknown")[:300],
+            err.get("url", ""),
+            err.get("userAgent", "")[:200],
+            err.get("timestamp", ""),
+            (err.get("stack") or "")[:500],
+        )
+    return {"ok": True}
+
+
 @app.post("/generate")
 async def generate(
     chat_request: ChatRequest, # CHANGED: Use the Pydantic model
@@ -840,11 +1202,11 @@ async def generate(
                 async for chunk in llm_event_stream(chat_request.topic, chat_request.history, settings=chat_request.settings):
                     accumulated_response += chunk
                     if await request.is_disconnected():
-                        debug_llm("client disconnected")
+                        logger.info("客户端断开连接（/generate）")
                         break
                     yield chunk
             except Exception as e:
-                debug_llm("streaming error", str(e))
+                logger.exception("流式生成异常（/generate）: %s", e)
                 yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
 
@@ -890,11 +1252,11 @@ async def generate_paper(
                     truncated=paper["truncated"],
                 ):
                     if await request.is_disconnected():
-                        debug_llm("paper client disconnected")
+                        logger.info("客户端断开连接（/paper/generate）")
                         break
                     yield chunk
             except Exception as e:
-                debug_llm("paper streaming error", str(e))
+                logger.exception("流式生成异常（/paper/generate）: %s", e)
                 yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
 
     headers = {
@@ -903,6 +1265,91 @@ async def generate_paper(
         "X-Accel-Buffering": "no",
     }
     return StreamingResponse(event_generator(), headers=headers)
+
+
+@app.post("/generate/copy")
+async def generate_copy(
+    copy_request: CopyRequest,
+    request: Request,
+):
+    """
+    Stage 1: Generate structured 5-act copy from a concept.
+    Returns an SSE stream of JSON tokens.
+    """
+    queued = generation_semaphore.locked()
+
+    async def event_generator():
+        if queued:
+            payload = json.dumps({"event": "queued"}, ensure_ascii=False)
+            yield f"data: {payload}\n\n"
+
+        async with generation_semaphore:
+            if queued:
+                payload = json.dumps({"event": "started"}, ensure_ascii=False)
+                yield f"data: {payload}\n\n"
+
+            try:
+                async for chunk in copy_llm_event_stream(
+                    copy_request.topic,
+                    settings=copy_request.settings,
+                ):
+                    if await request.is_disconnected():
+                        logger.info("客户端断开连接（/generate/copy）")
+                        break
+                    yield chunk
+            except Exception as e:
+                logger.exception("流式生成异常（/generate/copy）: %s", e)
+                yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+
+    headers = {
+        "Cache-Control": "no-store",
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(event_generator(), headers=headers)
+
+
+@app.post("/generate/animation")
+async def generate_animation(
+    animation_request: AnimationRequest,
+    request: Request,
+):
+    """
+    Stage 2: Generate HTML animation from structured copy JSON.
+    Returns an SSE stream of HTML tokens.
+    """
+    queued = generation_semaphore.locked()
+
+    async def event_generator():
+        if queued:
+            payload = json.dumps({"event": "queued"}, ensure_ascii=False)
+            yield f"data: {payload}\n\n"
+
+        async with generation_semaphore:
+            if queued:
+                payload = json.dumps({"event": "started"}, ensure_ascii=False)
+                yield f"data: {payload}\n\n"
+
+            try:
+                async for chunk in animation_from_copy_llm_event_stream(
+                    animation_request.copy_json,
+                    settings=animation_request.settings,
+                ):
+                    if await request.is_disconnected():
+                        logger.info("客户端断开连接（/generate/animation）")
+                        break
+                    yield chunk
+            except Exception as e:
+                logger.exception("流式生成异常（/generate/animation）: %s", e)
+                yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+
+    headers = {
+        "Cache-Control": "no-store",
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(event_generator(), headers=headers)
+
 
 @app.post("/export/video")
 async def export_video(video_request: VideoExportRequest, request: Request):
@@ -974,8 +1421,10 @@ async def export_video(video_request: VideoExportRequest, request: Request):
                     try:
                         video_id = render_task.result()
                     except Exception as exc:
+                        logger.exception("视频导出任务异常: %s", exc)
                         yield f"data: {json.dumps({'error': str(exc)})}\n\n"
                         return
+                    logger.info("视频导出完成 | video_id=%s", video_id)
                     yield f"data: {json.dumps({'event': '[DONE]', 'video_id': video_id})}\n\n"
                     return
                 elif event["status"] == "error":
@@ -1002,9 +1451,11 @@ async def download_video(video_id: str):
     exporter = get_video_exporter()
     path = exporter.get_video_path(video_id)
     if not path:
+        logger.warning("视频下载失败——未找到 | video_id=%s", video_id)
         raise HTTPException(status_code=404, detail="Video not found or expired")
     meta = exporter.get_metadata(video_id) or {}
     filename = f"animation_{video_id}.mp4"
+    logger.info("视频下载 | video_id=%s | file=%s", video_id, filename)
     return FileResponse(path, media_type="video/mp4", filename=filename)
 
 

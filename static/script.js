@@ -212,6 +212,7 @@ document.addEventListener('DOMContentLoaded', () => {
         output: document.getElementById('agent-output-template'),
         retry: document.getElementById('parse-retry-template'),
         player: document.getElementById('animation-player-template'),
+        'copy-review': document.getElementById('copy-review-template'),
         error: document.getElementById('agent-error-template'),
     };
 
@@ -237,6 +238,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let pendingExportHtml = '';
     let latestShareDetails = null;
     let previewConfirmResolver = null;
+    let currentCopyJson = null;
+    let copyReviewElement = null;
+    let isCopyEditing = false;
 
     function unlockPassphraseGate() {
         passphraseGate?.classList.add('hidden');
@@ -253,7 +257,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 unlockPassphraseGate();
             }
         } catch (error) {
-            console.warn('Failed to initialize passphrase gate:', error);
+            Logger.warn('Failed to initialize passphrase gate:', error);
         }
     }
 
@@ -332,7 +336,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (oneQuoteInterval) clearTimeout(oneQuoteInterval);
             scheduleNextQuote();
         } catch (error) {
-            console.warn('Failed to load ONE quotes:', error);
+            Logger.warn('Failed to load ONE quotes:', error);
         }
     }
 
@@ -425,7 +429,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     markOutputAsComplete(outputElement);
 
                     if (!accumulatedCode || !isHtmlContentValid(accumulatedCode)) {
-                        console.warn('Unable to parse renderable HTML from full response:', fullResponse);
+                        Logger.warn('Unable to parse renderable HTML from full response:', fullResponse.substring(0, 200));
                         appendRetryPrompt(displayTopic);
                         scrollToBottom();
                         return;
@@ -434,7 +438,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     try {
                         appendAnimationPlayer(accumulatedCode, displayTopic);
                     } catch (err) {
-                        console.error('appendAnimationPlayer failed:', err);
+                        Logger.error('appendAnimationPlayer failed:', err);
                         appendRetryPrompt(displayTopic);
                         scrollToBottom();
                         return;
@@ -448,7 +452,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 try {
                     data = JSON.parse(jsonStr);
                 } catch (err) {
-                    console.error('Failed to parse JSON:', jsonStr);
+                    Logger.error('Failed to parse JSON:', jsonStr.substring(0, 200));
                     throw new LLMParseError('Invalid response format from server.');
                 }
 
@@ -484,7 +488,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function startGeneration(topic, options = {}) {
-        console.log('Getting generation from backend.');
+        Logger.info('Getting generation from backend.');
         if (!options.reuseUserMessage) appendUserMessage(topic);
         const agentThinkingMessage = appendAgentStatus(translations.agentThinking[currentLang]);
         const submitButton = document.querySelector('.submit-button');
@@ -506,7 +510,7 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             await consumeGenerationResponse(response, topic, agentThinkingMessage, outputElement);
         } catch (error) {
-            console.error("Streaming failed:", error);
+            Logger.error("Streaming failed:", error);
             if (agentThinkingMessage) agentThinkingMessage.remove();
 
             let displayMessage = translations.errorFetchFailed[currentLang];
@@ -560,7 +564,7 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             await consumeGenerationResponse(response, displayTopic, agentThinkingMessage, outputElement, { saveAssistantHistory: false });
         } catch (error) {
-            console.error("Paper streaming failed:", error);
+            Logger.error("Paper streaming failed:", error);
             if (agentThinkingMessage) agentThinkingMessage.remove();
 
             let displayMessage = translations.errorFetchFailed[currentLang];
@@ -653,7 +657,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (pendingGenerationIsInitial) switchToChatView();
 
         conversationHistory.push({ role: 'user', content: topic });
-        startGeneration(topic);
+        // Use the new two-stage flow: generate copy first, then animation
+        generateCopy(topic);
         if (pendingGenerationIsInitial) {
             initialInput.value = '';
             placeholderContainer?.classList?.remove('hidden');
@@ -666,6 +671,143 @@ document.addEventListener('DOMContentLoaded', () => {
         closeSettingsPanel();
     }
 
+    // ── 复制按钮 ──
+    var COPY_ICON_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+    var CHECK_ICON_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+
+    function createCopyButton(messageElement) {
+        if (!messageElement) return null;
+        // 跳过思考和重试消息
+        if (messageElement.querySelector('.status-bubble')) return null;
+        if (messageElement.classList.contains('has-retry')) return null;
+
+        var btn = document.createElement('button');
+        btn.className = 'message-copy-btn';
+        btn.type = 'button';
+        btn.title = '复制';
+        btn.innerHTML = COPY_ICON_SVG + ' <span class="copy-label">复制</span>';
+
+        btn.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+
+            // 即时视觉反馈
+            btn.style.transform = 'scale(0.9)';
+            setTimeout(function () { btn.style.transform = ''; }, 120);
+
+            var text = getMessageText(messageElement);
+            if (!text) {
+                btn.style.outline = '2px solid #f59e0b';
+                btn.style.outlineOffset = '1px';
+                setTimeout(function () { btn.style.outline = ''; btn.style.outlineOffset = ''; }, 600);
+                return;
+            }
+
+            tryCopy(text, btn);
+        });
+
+        return btn;
+    }
+
+    function getMessageText(el) {
+        // 1. 大模型输出代码
+        var code = el.querySelector('.raw-output code');
+        if (code) {
+            var t = code.textContent || '';
+            if (t.trim()) return t.trim();
+        }
+
+        // 2. 错误详情
+        var err = el.querySelector('.error-detail-text');
+        if (err) {
+            var t = err.textContent || '';
+            if (t.trim()) return t.trim();
+        }
+
+        // 3. 用户消息
+        var bubble = el.querySelector('.message-bubble');
+        if (bubble) {
+            var t = bubble.textContent || '';
+            if (t.trim()) return t.trim();
+        }
+
+        // 4. 文案评审
+        var review = el.querySelector('.copy-review-card');
+        if (review) {
+            var parts = [];
+            var title = review.querySelector('.copy-title');
+            if (title && title.textContent) parts.push(title.textContent.trim());
+            review.querySelectorAll('.act-card').forEach(function (act) {
+                act.querySelectorAll('.act-field').forEach(function (f) {
+                    var lb = f.querySelector('label');
+                    var vl = f.querySelector('span, input, textarea');
+                    if (lb && vl) {
+                        var v = vl.value !== undefined ? vl.value : vl.textContent;
+                        if (v && v.trim()) parts.push(lb.textContent.trim() + ': ' + v.trim());
+                    }
+                });
+            });
+            if (parts.length) return parts.join('\n\n');
+        }
+
+        // 5. 兜底
+        return (el.textContent || '').trim();
+    }
+
+    function tryCopy(text, btn) {
+        // 方法1: execCommand
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0;pointer-events:none;';
+        ta.readOnly = true;
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        try { ta.setSelectionRange(0, 999999); } catch (e) {}
+
+        var ok = false;
+        try { ok = document.execCommand('copy'); } catch (e) {}
+
+        document.body.removeChild(ta);
+
+        if (ok) {
+            onCopyDone(btn, true);
+            return;
+        }
+
+        // 方法2: Clipboard API
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+            navigator.clipboard.writeText(text).then(
+                function () { onCopyDone(btn, true); },
+                function () { onCopyDone(btn, false); }
+            );
+        } else {
+            onCopyDone(btn, false);
+        }
+    }
+
+    function onCopyDone(btn, success) {
+        if (success) {
+            btn.classList.add('copied');
+            btn.innerHTML = CHECK_ICON_SVG + ' <span class="copy-label">已复制</span>';
+            btn.title = '已复制 ✓';
+        } else {
+            btn.classList.add('copy-failed');
+            btn.title = '复制失败，请手动选择';
+        }
+        clearTimeout(window._copyTimer);
+        window._copyTimer = setTimeout(function () {
+            btn.classList.remove('copied', 'copy-failed');
+            btn.innerHTML = COPY_ICON_SVG + ' <span class="copy-label">复制</span>';
+            btn.title = '复制';
+        }, success ? 1500 : 2500);
+    }
+
+    function attachCopyButton(element) {
+        var btn = createCopyButton(element);
+        if (btn) element.appendChild(btn);
+    }
+
     function appendFromTemplate(template, text) {
         const node = template.content.cloneNode(true);
         const element = node.firstElementChild;
@@ -676,6 +818,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (translation) el.textContent = translation;
         });
         chatLog.appendChild(element);
+        attachCopyButton(element);
         scrollToBottom();
         return element;
     }
@@ -926,7 +1069,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 exportStartButton.textContent = translations.exportStartRender[currentLang];
             }
         } catch (error) {
-            console.error('Video export failed:', error);
+            Logger.error('Video export failed:', error);
             showWarning('Video export failed. Please try again.');
             exportStartButton.disabled = false;
             exportStartButton.textContent = translations.exportStartRender[currentLang];
@@ -934,7 +1077,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function appendAnimationPlayer(htmlContent, topic) {
-        console.log('Appending animation player with topic:', topic);
+        Logger.info('Appending animation player:', topic);
         const node = templates.player.content.cloneNode(true);
         const playerElement = node.firstElementChild;
         playerElement.querySelectorAll('[data-translate-key]').forEach(el => {
@@ -975,6 +1118,7 @@ document.addEventListener('DOMContentLoaded', () => {
             openExportModal(htmlContent);
         });
         chatLog.appendChild(playerElement);
+        attachCopyButton(playerElement);
         scrollToBottom();
     }
 
@@ -985,17 +1129,384 @@ document.addEventListener('DOMContentLoaded', () => {
         // 检查是否存在解析错误
         const parseErrors = doc.querySelectorAll("parsererror");
         if (parseErrors.length > 0) {
-            console.warn("HTML 解析失败：", parseErrors[0].textContent);
+            Logger.warn("HTML 解析失败：", parseErrors[0].textContent);
             return false;
         }
 
         // 可选：检测是否有 <html><body> 结构或是否为空
         if (!doc.body || doc.body.innerHTML.trim() === "") {
-            console.warn("HTML 内容为空");
+            Logger.warn("HTML 内容为空");
             return false;
         }
 
         return true;
+    }
+
+    // ── Two-Stage Generation: Copy → Animation ──
+
+    async function generateCopy(topic) {
+        Logger.info('Stage 1: Generating copy for:', topic);
+        appendUserMessage(topic);
+        const agentThinkingMessage = appendAgentStatus(translations.agentThinking[currentLang]);
+        const submitButton = document.querySelector('.submit-button');
+        activeGenerationController = new AbortController();
+        if (submitButton) {
+            submitButton.disabled = true;
+            submitButton.classList.add('disabled');
+        }
+        if (stopGenerationButton) stopGenerationButton.hidden = false;
+        accumulatedCode = '';
+        const outputElement = appendOutputBlock();
+
+        try {
+            const response = await fetch(`${config.apiBaseUrl}/generate/copy`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ topic: topic, settings: getGenerationSettings() }),
+                signal: activeGenerationController.signal
+            });
+            await consumeCopyResponse(response, topic, agentThinkingMessage, outputElement);
+        } catch (error) {
+            Logger.error("Copy generation failed:", error);
+            if (agentThinkingMessage) agentThinkingMessage.remove();
+
+            let displayMessage = translations.errorFetchFailed[currentLang];
+            if (error.name === 'AbortError') {
+                displayMessage = translations.generationStopped[currentLang];
+            } else if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
+                displayMessage = translations.errorFetchFailed[currentLang];
+            } else if (error.message.includes('status: 429')) {
+                displayMessage = translations.errorTooManyRequests[currentLang];
+            } else if (error instanceof LLMParseError) {
+                displayMessage = translations.errorLLMParseError[currentLang];
+            }
+
+            showWarning(displayMessage);
+            appendErrorMessage(translations.errorMessage[currentLang], error);
+            if (outputElement) markOutputAsComplete(outputElement);
+        } finally {
+            if (submitButton) {
+                submitButton.disabled = false;
+                submitButton.classList.remove('disabled');
+            }
+            if (stopGenerationButton) stopGenerationButton.hidden = true;
+            activeGenerationController = null;
+        }
+    }
+
+    async function consumeCopyResponse(response, displayTopic, agentThinkingMessage, outputElement) {
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let fullResponse = '';
+        let queueWarningVisible = false;
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n\n');
+            buffer = lines.pop();
+
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+
+                const jsonStr = line.substring(6);
+                if (jsonStr.includes('[DONE]')) {
+                    conversationHistory.push({ role: 'assistant', content: fullResponse });
+                    markOutputAsComplete(outputElement);
+
+                    // Parse the accumulated JSON
+                    let copyJson = null;
+                    try {
+                        // Try to extract JSON from the response (handle possible markdown wrapping)
+                        let jsonText = fullResponse;
+                        const jsonMatch = fullResponse.match(/```(?:json)?\s*([\s\S]*?)```/);
+                        if (jsonMatch) jsonText = jsonMatch[1];
+                        // Find the outermost { ... }
+                        const braceStart = jsonText.indexOf('{');
+                        const braceEnd = jsonText.lastIndexOf('}');
+                        if (braceStart !== -1 && braceEnd > braceStart) {
+                            jsonText = jsonText.substring(braceStart, braceEnd + 1);
+                        }
+                        copyJson = JSON.parse(jsonText);
+                    } catch (err) {
+                        Logger.error('Failed to parse copy JSON:', err, 'Raw (first 200 chars):', fullResponse.substring(0, 200));
+                        appendRetryPrompt(displayTopic);
+                        scrollToBottom();
+                        return;
+                    }
+
+                    if (!copyJson || !copyJson.acts || !copyJson.acts.length) {
+                        Logger.warn('Invalid copy JSON structure:', copyJson);
+                        appendRetryPrompt(displayTopic);
+                        scrollToBottom();
+                        return;
+                    }
+
+                    currentCopyJson = copyJson;
+                    appendCopyReview(copyJson, displayTopic);
+                    scrollToBottom();
+                    return;
+                }
+
+                let data;
+                try {
+                    data = JSON.parse(jsonStr);
+                } catch (err) {
+                    Logger.error('Failed to parse JSON:', jsonStr.substring(0, 200));
+                    throw new LLMParseError('Invalid response format from server.');
+                }
+
+                if (data.event === 'queued') {
+                    queueWarningVisible = true;
+                    showWarning(translations.generationQueued[currentLang], {
+                        persistent: true,
+                        blocking: true,
+                        loading: true,
+                        cancelable: true,
+                        cancelText: translations.cancelQueuedTask[currentLang],
+                    });
+                    continue;
+                }
+
+                if (data.event === 'started') {
+                    if (queueWarningVisible) {
+                        forceHideWarning();
+                        showWarning(translations.generationStarted[currentLang]);
+                        queueWarningVisible = false;
+                    }
+                    continue;
+                }
+
+                if (data.error) throw new LLMParseError(data.error);
+
+                const token = data.token || '';
+                if (agentThinkingMessage) agentThinkingMessage.remove();
+                fullResponse += token;
+                updateOutputBlock(outputElement, token);
+            }
+        }
+    }
+
+    function appendCopyReview(copyJson, topic) {
+        const node = templates['copy-review']?.content?.cloneNode(true);
+        if (!node) {
+            Logger.error('copy-review template not found');
+            return;
+        }
+        const element = node.firstElementChild;
+        copyReviewElement = element;
+
+        // Update header
+        const titleEl = element.querySelector('.copy-title');
+        if (titleEl) titleEl.textContent = copyJson.title || topic;
+
+        const narrativeTypeEl = element.querySelector('.copy-narrative-type');
+        if (narrativeTypeEl) {
+            const typeMap = { problem_conflict: '问题冲突型' };
+            narrativeTypeEl.textContent = typeMap[copyJson.narrative_type] || copyJson.narrative_type || '';
+        }
+
+        const durationEl = element.querySelector('.copy-duration');
+        if (durationEl) durationEl.textContent = `约 ${copyJson.total_duration_hint || 60} 秒`;
+
+        // Build act cards
+        const actsContainer = element.querySelector('.acts-container');
+        if (actsContainer && copyJson.acts) {
+            const actNames = ['认知爆破', '延迟满足', '层层揭秘', '高潮揭晓', '记忆钉'];
+            const actIcons = ['💥', '🔮', '🔍', '💡', '📌'];
+
+            copyJson.acts.forEach((act, index) => {
+                const card = document.createElement('div');
+                card.className = 'act-card';
+                card.dataset.actIndex = index;
+                card.innerHTML = `
+                    <div class="act-card-header">
+                        <span class="act-number">${actIcons[index] || '▶'} 第${act.act || index + 1}幕</span>
+                        <span class="act-name">${act.name || actNames[index] || ''}</span>
+                        <span class="act-goal">${act.goal || ''}</span>
+                        <span class="act-duration-hint">~${act.duration_hint || 0}s</span>
+                    </div>
+                    <div class="act-card-body">
+                        <div class="act-field">
+                            <label>手法</label>
+                            <span class="act-method" data-field="method_used">${act.method_used || ''}</span>
+                        </div>
+                        <div class="act-field">
+                            <label>旁白（中文）</label>
+                            <span class="act-narration" data-field="narration">${act.narration || ''}</span>
+                        </div>
+                        <div class="act-field">
+                            <label>旁白（英文）</label>
+                            <span class="act-narration-en" data-field="narration_en">${act.narration_en || ''}</span>
+                        </div>
+                        <div class="act-field">
+                            <label>画面描述</label>
+                            <span class="act-visual" data-field="visual_description">${act.visual_description || ''}</span>
+                        </div>
+                        <div class="act-field">
+                            <label>画面大字</label>
+                            <span class="act-on-screen" data-field="on_screen_text">${act.on_screen_text || ''}</span>
+                        </div>
+                    </div>
+                `;
+                actsContainer.appendChild(card);
+            });
+        }
+
+        // Wire up buttons
+        const editButton = element.querySelector('.copy-edit-toggle');
+        if (editButton) {
+            editButton.addEventListener('click', () => toggleCopyEdit());
+        }
+
+        const regenerateButton = element.querySelector('.copy-regenerate');
+        if (regenerateButton) {
+            regenerateButton.addEventListener('click', () => {
+                element.remove();
+                copyReviewElement = null;
+                currentCopyJson = null;
+                generateCopy(topic);
+            });
+        }
+
+        const generateAnimButton = element.querySelector('.copy-generate-animation');
+        if (generateAnimButton) {
+            generateAnimButton.addEventListener('click', () => {
+                const editedCopy = isCopyEditing ? exportEditedCopy() : currentCopyJson;
+                if (editedCopy) {
+                    currentCopyJson = editedCopy;
+                    generateAnimationFromCopy(editedCopy);
+                }
+            });
+        }
+
+        chatLog.appendChild(element);
+        attachCopyButton(element);
+        scrollToBottom();
+    }
+
+    function toggleCopyEdit() {
+        if (!copyReviewElement) return;
+
+        isCopyEditing = !isCopyEditing;
+        const editButton = copyReviewElement.querySelector('.copy-edit-toggle span');
+        const allFields = copyReviewElement.querySelectorAll('.act-card-body span[data-field]');
+
+        if (isCopyEditing) {
+            if (editButton) editButton.textContent = '完成编辑';
+            copyReviewElement.classList.add('is-editing');
+            // Convert spans to inputs/textareas
+            allFields.forEach(span => {
+                const field = span.dataset.field;
+                const value = span.textContent;
+                const isLong = field === 'visual_description' || field === 'narration' || field === 'narration_en';
+                const input = document.createElement(isLong ? 'textarea' : 'input');
+                input.type = isLong ? undefined : 'text';
+                input.value = value;
+                input.dataset.field = field;
+                input.className = 'act-edit-field';
+                if (isLong) input.rows = 3;
+                span.replaceWith(input);
+            });
+        } else {
+            if (editButton) editButton.textContent = '编辑文案';
+            copyReviewElement.classList.remove('is-editing');
+            // Convert inputs back to spans
+            const allInputs = copyReviewElement.querySelectorAll('.act-edit-field');
+            allInputs.forEach(input => {
+                const field = input.dataset.field;
+                const value = input.value;
+                const span = document.createElement('span');
+                span.textContent = value;
+                span.dataset.field = field;
+                span.className = `act-${field}`;
+                input.replaceWith(span);
+            });
+        }
+    }
+
+    function exportEditedCopy() {
+        if (!copyReviewElement || !currentCopyJson) return null;
+
+        const editedCopy = JSON.parse(JSON.stringify(currentCopyJson)); // Deep clone
+
+        const actCards = copyReviewElement.querySelectorAll('.act-card');
+        actCards.forEach((card, index) => {
+            if (index >= editedCopy.acts.length) return;
+            const act = editedCopy.acts[index];
+
+            const methodEl = card.querySelector('[data-field="method_used"]');
+            if (methodEl) act.method_used = methodEl.textContent || methodEl.value || '';
+
+            const narrationEl = card.querySelector('[data-field="narration"]');
+            if (narrationEl) act.narration = narrationEl.textContent || narrationEl.value || '';
+
+            const narrationEnEl = card.querySelector('[data-field="narration_en"]');
+            if (narrationEnEl) act.narration_en = narrationEnEl.textContent || narrationEnEl.value || '';
+
+            const visualEl = card.querySelector('[data-field="visual_description"]');
+            if (visualEl) act.visual_description = visualEl.textContent || visualEl.value || '';
+
+            const onScreenEl = card.querySelector('[data-field="on_screen_text"]');
+            if (onScreenEl) act.on_screen_text = onScreenEl.textContent || onScreenEl.value || '';
+        });
+
+        return editedCopy;
+    }
+
+    async function generateAnimationFromCopy(copyJson) {
+        Logger.info('Stage 2: Generating animation from copy');
+        const agentThinkingMessage = appendAgentStatus(translations.agentThinking[currentLang]);
+        const submitButton = document.querySelector('.submit-button');
+        activeGenerationController = new AbortController();
+        if (submitButton) {
+            submitButton.disabled = true;
+            submitButton.classList.add('disabled');
+        }
+        if (stopGenerationButton) stopGenerationButton.hidden = false;
+        accumulatedCode = '';
+        const outputElement = appendOutputBlock();
+
+        try {
+            const response = await fetch(`${config.apiBaseUrl}/generate/animation`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ copy_json: copyJson, settings: getGenerationSettings() }),
+                signal: activeGenerationController.signal
+            });
+            // Reuse the same SSE consumer from the original flow
+            await consumeGenerationResponse(response, copyJson.title || '动画', agentThinkingMessage, outputElement);
+        } catch (error) {
+            Logger.error("Animation from copy failed:", error);
+            if (agentThinkingMessage) agentThinkingMessage.remove();
+
+            let displayMessage = translations.errorFetchFailed[currentLang];
+            if (error.name === 'AbortError') {
+                displayMessage = translations.generationStopped[currentLang];
+            } else if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
+                displayMessage = translations.errorFetchFailed[currentLang];
+            } else if (error.message.includes('status: 429')) {
+                displayMessage = translations.errorTooManyRequests[currentLang];
+            } else if (error instanceof LLMParseError) {
+                displayMessage = translations.errorLLMParseError[currentLang];
+            }
+
+            showWarning(displayMessage);
+            appendErrorMessage(translations.errorMessage[currentLang], error);
+            if (outputElement) markOutputAsComplete(outputElement);
+        } finally {
+            if (submitButton) {
+                submitButton.disabled = false;
+                submitButton.classList.remove('disabled');
+            }
+            if (stopGenerationButton) stopGenerationButton.hidden = true;
+            activeGenerationController = null;
+        }
     }
 
     const scrollToBottom = () => chatLog.scrollTo({ top: chatLog.scrollHeight, behavior: 'smooth' });
@@ -1113,7 +1624,7 @@ document.addEventListener('DOMContentLoaded', () => {
             try {
                 await shareHtmlLink(pendingShareHtml, shareExpiration.value, password, getPreviewSize());
             } catch (error) {
-                console.error('Failed to create share link:', error);
+                Logger.error('Failed to create share link:', error);
                 showWarning(translations.shareFailed[currentLang]);
             }
         });

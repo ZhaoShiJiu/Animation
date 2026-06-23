@@ -21,6 +21,9 @@ from datetime import datetime, timedelta
 from typing import Optional, Callable, Awaitable
 
 import pytz
+from logger import get_logger
+
+logger = get_logger(__name__)
 
 shanghai_tz = pytz.timezone("Asia/Shanghai")
 
@@ -191,12 +194,14 @@ class VideoExporter:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
+            logger.info("HyperFrames 子进程已启动 | video_id=%s | cmd=npx hyperframes render", video_id)
 
             last_pct = 5
             async for line in proc.stdout:
                 line_str = line.decode("utf-8", errors="replace").strip()
                 if not line_str:
                     continue
+                logger.debug("HF stdout: %s", line_str[:200])
                 pct_match = re.search(r'(\d{1,3})%', line_str)
                 if pct_match:
                     raw = int(pct_match.group(1))
@@ -208,9 +213,12 @@ class VideoExporter:
             await proc.wait()
 
             if proc.returncode != 0:
+                logger.error("HyperFrames 子进程异常退出 | video_id=%s | exit_code=%d",
+                             video_id, proc.returncode)
                 raise RuntimeError(
                     f"HyperFrames render exited with code {proc.returncode}"
                 )
+            logger.info("HyperFrames 渲染进程完成 | video_id=%s", video_id)
 
             # --- Locate output ---
             if not os.path.exists(output_path):
@@ -273,6 +281,7 @@ class VideoExporter:
 
             if on_progress:
                 await on_progress("initializing", 5, "启动无头浏览器...")
+            logger.info("Playwright 录制开始 | video_id=%s | duration=%s", video_id, duration)
 
             async with async_playwright() as p:
                 browser = await p.chromium.launch(
@@ -289,6 +298,7 @@ class VideoExporter:
                         "--disable-web-security",
                     ],
                 )
+                logger.info("Chromium 已启动 | video_id=%s", video_id)
                 context = await browser.new_context(
                     viewport={"width": width, "height": height},
                     record_video_dir=temp_dir,
@@ -311,6 +321,7 @@ class VideoExporter:
 
                 # Load HTML with a timeout guard
                 await page.set_content(html, wait_until="load", timeout=30000)
+                logger.info("HTML 已加载到浏览器 | video_id=%s", video_id)
 
                 if on_progress:
                     await on_progress("recording", 20, "正在录制动画...")
@@ -335,9 +346,12 @@ class VideoExporter:
                     vp = await page.video.path()
                     if vp and os.path.exists(vp):
                         webm_path = vp
+                        logger.info("WebM 录制文件 | video_id=%s | path=%s | size=%d",
+                                    video_id, webm_path, os.path.getsize(webm_path))
 
                 await context.close()
                 await browser.close()
+                logger.info("浏览器已关闭 | video_id=%s", video_id)
 
             if not webm_path or not os.path.exists(webm_path):
                 # Try to find any webm in the temp dir
@@ -373,6 +387,8 @@ class VideoExporter:
     @staticmethod
     async def _webm_to_mp4(input_path: str, output_path: str, fps: int):
         """Convert WebM video to H.264 MP4 using FFmpeg."""
+        logger.info("FFmpeg 转码开始 | input=%s | output=%s | fps=%d",
+                    os.path.basename(input_path), os.path.basename(output_path), fps)
         proc = await asyncio.create_subprocess_exec(
             "ffmpeg", "-y",
             "-i", input_path,
@@ -386,11 +402,15 @@ class VideoExporter:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        await proc.wait()
+        stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
+            stderr_str = stderr.decode("utf-8", errors="replace")[:500] if stderr else ""
+            logger.error("FFmpeg 转码失败 | exit=%d | stderr=%s", proc.returncode, stderr_str)
             raise RuntimeError(
                 f"FFmpeg conversion failed (exit {proc.returncode})"
             )
+        logger.info("FFmpeg 转码完成 | output=%s | size=%d",
+                    os.path.basename(output_path), os.path.getsize(output_path))
 
     # ------------------------------------------------------------------
     # Main export entry point
@@ -439,10 +459,14 @@ class VideoExporter:
         if duration_hint is None:
             duration_hint = self.parse_duration(html)
 
+        logger.info("视频导出开始 | video_id=%s | resolution=%dx%d | fps=%d | duration=%s",
+                    video_id, width, height, fps, duration_hint)
+
         if on_progress:
             await on_progress("starting", 0, "正在准备视频导出...")
 
         use_hf = self.has_hyperframes_markup(html)
+        logger.info("渲染路径判断 | video_id=%s | hyperframes=%s", video_id, use_hf)
 
         try:
             if use_hf:
@@ -454,6 +478,8 @@ class VideoExporter:
                         html, video_id, width, height, fps, quality, on_progress,
                     )
                 except Exception as exc:
+                    logger.warning("HyperFrames 渲染失败，回退到 Playwright | video_id=%s | error=%s",
+                                   video_id, str(exc)[:200])
                     if on_progress:
                         await on_progress(
                             "fallback", 5,
@@ -468,6 +494,7 @@ class VideoExporter:
                     html, video_id, width, height, fps, duration_hint, on_progress,
                 )
         except Exception as exc:
+            logger.exception("视频导出失败 | video_id=%s | error=%s", video_id, exc)
             if on_progress:
                 await on_progress("error", 0, f"视频导出失败: {str(exc)[:80]}")
             raise

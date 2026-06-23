@@ -243,6 +243,35 @@
         </div>
     </template>
 
+    <template id="copy-review-template">
+        <div class="message-group agent has-copy-review">
+            <article class="copy-review-card">
+                <header class="copy-review-header">
+                    <div>
+                        <p class="eyebrow">COPY REVIEW</p>
+                        <h3 class="copy-title"></h3>
+                    </div>
+                    <div class="copy-meta">
+                        <span class="copy-narrative-type"></span>
+                        <span class="copy-duration"></span>
+                    </div>
+                </header>
+                <div class="acts-container"></div>
+                <div class="copy-actions">
+                    <button class="action-button copy-edit-toggle">
+                        <span>编辑文案</span>
+                    </button>
+                    <button class="action-button copy-regenerate">
+                        <span>重新生成文案</span>
+                    </button>
+                    <button class="action-button copy-generate-animation is-primary">
+                        <span>生成动画</span>
+                    </button>
+                </div>
+            </article>
+        </div>
+    </template>
+
     <div id="paper-upload-modal" class="modal-overlay">
         <form id="paper-upload-form" class="modal-content share-form paper-upload-form">
             <button id="paper-upload-close" class="modal-close-button" type="button" title="Close">×</button>
@@ -379,6 +408,7 @@
         </div>
     </div>
 
+    <script src="/static/logger.js?v={{ time }}"></script>
     <script src="/static/script.js?v={{ time }}"></script>
 
     <div id="overlay" class="overlay" style="display: none;"></div>
