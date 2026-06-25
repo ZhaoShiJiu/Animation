@@ -24,7 +24,8 @@ from pathlib import Path
 # 配置常量
 # ---------------------------------------------------------------------------
 
-_LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
+_BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+_LOG_DIR = os.path.join(_BASE_DIR, "storage", "logs")
 _LOG_FILE = os.path.join(_LOG_DIR, "app.log")
 _LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
 _LOG_BACKUP_COUNT = 5
@@ -91,7 +92,7 @@ def _init_logging():
     log_level_str = os.environ.get("LOG_LEVEL", "").upper()
     if not log_level_str:
         try:
-            creds_path = os.path.join(os.path.dirname(__file__), "credentials.json")
+            creds_path = os.path.join(_BASE_DIR, "credentials.json")
             if os.path.exists(creds_path):
                 with open(creds_path, "r", encoding="utf-8") as f:
                     creds = json.load(f)
@@ -137,7 +138,7 @@ def get_logger(name: str) -> logging.Logger:
     """获取指定名称的 logger 实例。
 
     用法:
-        from logger import get_logger
+        from backend.logger import get_logger
         logger = get_logger(__name__)
         logger.info("请求处理中...")
         logger.error("发生错误", exc_info=True)

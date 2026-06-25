@@ -21,7 +21,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Callable, Awaitable
 
 import pytz
-from logger import get_logger
+from backend.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -100,9 +100,9 @@ class VideoExporter:
         await route.abort()
 
     def __init__(self, storage_dir: str = None, temp_dir: str = None):
-        base = os.path.dirname(__file__)
-        self.storage_dir = storage_dir or os.path.join(base, "exported_videos")
-        self.temp_dir = temp_dir or os.path.join(base, "temp_render")
+        base = os.path.dirname(os.path.dirname(__file__))
+        self.storage_dir = storage_dir or os.path.join(base, "storage", "exported_videos")
+        self.temp_dir = temp_dir or os.path.join(base, "storage", "temp_render")
         os.makedirs(self.storage_dir, exist_ok=True)
         os.makedirs(self.temp_dir, exist_ok=True)
 

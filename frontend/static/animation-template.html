@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="animation-duration" content="{{TOTAL_DURATION}}">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
 <style>
 /* ============================================================
    Continuous Flow Animation — Design System
@@ -221,6 +221,22 @@ body {
   <div id="subtitle-en"></div>
 </div>
 
+<!-- Error overlay (hidden by default) -->
+<div id="anim-error" style="display:none;position:absolute;inset:0;z-index:100;background:rgba(15,23,42,0.94);flex-direction:column;align-items:center;justify-content:center;gap:16px;color:#fff;font-family:var(--font);padding:40px;text-align:center;">
+  <div style="font-size:3rem;margin-bottom:8px;">⚠️</div>
+  <div id="anim-error-msg" style="font-size:1.1rem;max-width:650px;line-height:1.7;"></div>
+  <div id="anim-error-detail" style="font-size:0.8rem;color:#94a3b8;max-width:550px;line-height:1.5;word-break:break-all;"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     SEGMENT DATA (JSON — filled by LLM)
+     ═══════════════════════════════════════════ -->
+<script type="application/json" id="seg-data-0">{{SEGMENT_0}}</script>
+<script type="application/json" id="seg-data-1">{{SEGMENT_1}}</script>
+<script type="application/json" id="seg-data-2">{{SEGMENT_2}}</script>
+<script type="application/json" id="seg-data-3">{{SEGMENT_3}}</script>
+<script type="application/json" id="seg-data-4">{{SEGMENT_4}}</script>
+
 <!-- ═══════════════════════════════════════════
      GSAP CONTINUOUS FLOW TIMELINE
      ═══════════════════════════════════════════ -->
@@ -229,6 +245,28 @@ body {
   var W = {{SCENE_W}}, H = {{SCENE_H}};
   var C1 = '{{PRIMARY_COLOR}}', C2 = '{{SECONDARY_COLOR}}';
   var durations = [{{SEGMENT_DURATIONS}}];
+
+  /* ═══ Error reporting ═══ */
+  function showError(msg, detail) {
+    var overlay = document.getElementById('anim-error');
+    var msgEl = document.getElementById('anim-error-msg');
+    var detailEl = document.getElementById('anim-error-detail');
+    if (overlay) overlay.style.display = 'flex';
+    if (msgEl) msgEl.textContent = msg;
+    if (detailEl && detail) detailEl.textContent = detail;
+    // Also hide stage content
+    var stage = document.getElementById('stage');
+    if (stage) stage.style.display = 'none';
+    var subtitleBar = document.getElementById('subtitle-bar');
+    if (subtitleBar) subtitleBar.style.display = 'none';
+  }
+
+  // Check GSAP availability
+  if (typeof gsap === 'undefined') {
+    showError('GSAP 动画库加载失败',
+      '无法加载 GSAP (cdn.jsdelivr.net)。请检查网络连接或 CDN 是否可访问。');
+    return;
+  }
 
   /* ═══ Master timeline ═══ */
   var masterTL = gsap.timeline({ paused: false });
@@ -303,16 +341,36 @@ body {
   }
 
   // ═══════════════════════════════════════════
-  // SEGMENT DATA (filled by LLM)
+  // SEGMENT DATA (loaded from JSON blocks filled by LLM)
   // Each segment: { title, body, bigNum, visualSVG, steps, compare, subZh, subEn, styles }
   // ═══════════════════════════════════════════
-  var segments = [
-    {{SEGMENT_0}},
-    {{SEGMENT_1}},
-    {{SEGMENT_2}},
-    {{SEGMENT_3}},
-    {{SEGMENT_4}}
-  ];
+  var segments = [];
+  var SEGMENT_COUNT = 5;
+  var parseErrors = [];
+  for (var si = 0; si < SEGMENT_COUNT; si++) {
+    try {
+      var scriptEl = document.getElementById('seg-data-' + si);
+      if (scriptEl && scriptEl.textContent.trim()) {
+        segments[si] = JSON.parse(scriptEl.textContent.trim());
+      } else {
+        segments[si] = null;
+        var msg = 'Segment ' + si + ' 数据为空';
+        console.warn('[Animation] ' + msg);
+        parseErrors.push(msg);
+      }
+    } catch(parseErr) {
+      console.error('[Animation] Segment ' + si + ' JSON 解析失败:', parseErr.message);
+      parseErrors.push('Segment ' + si + ': ' + parseErr.message);
+      segments[si] = null;
+    }
+  }
+  // Report parse errors
+  if (parseErrors.length > 0) {
+    console.error('[Animation] ' + parseErrors.length + ' segment(s) failed: ' + parseErrors.join('; '));
+  }
+  if (parseErrors.length >= SEGMENT_COUNT) {
+    showError('所有段落数据解析失败', parseErrors.join('\n'));
+  }
 
   // Build the continuous flow
   var segElements = []; // track elements per segment for cleanup
@@ -320,6 +378,7 @@ body {
 
   for (var si = 0; si < segments.length; si++) {
     var seg = segments[si];
+    if (!seg) { t += durations[si]; continue; }  // Skip empty/malformed segments
     var dur = durations[si];
     var segStart = t;
     var segEls = [];
@@ -378,11 +437,26 @@ body {
         { scale: 1, opacity: 1, duration: 0.7, ease: 'power3.out' },
         segStart + 0.6
       );
-      // Animate SVG strokes
+      // Animate SVG elements with data-draw — use different strategies per element type
       vis.querySelectorAll('[data-draw]').forEach(function(s, i) {
-        var len = s.getTotalLength ? s.getTotalLength() : 200;
-        gsap.set(s, { strokeDasharray: len, strokeDashoffset: len });
-        masterTL.to(s, { strokeDashoffset: 0, duration: 1.2, ease: 'power2.inOut' }, segStart + 0.9 + i * 0.2);
+        var tag = s.tagName.toLowerCase();
+        // path / line / polyline: stroke-dashoffset "draw" animation
+        if (tag === 'path' || tag === 'line' || tag === 'polyline') {
+          var len = s.getTotalLength ? s.getTotalLength() : 300;
+          if (!len || len <= 0) len = 300;
+          gsap.set(s, { strokeDasharray: len, strokeDashoffset: len });
+          masterTL.to(s, { strokeDashoffset: 0, duration: 1.2, ease: 'power2.inOut' }, segStart + 0.9 + i * 0.2);
+        }
+        // circle / rect / polygon / ellipse: scale-in + fade-in bounce
+        else if (tag === 'circle' || tag === 'rect' || tag === 'polygon' || tag === 'ellipse') {
+          gsap.set(s, { scale: 0, opacity: 0, transformOrigin: 'center center' });
+          masterTL.to(s, { scale: 1, opacity: 1, duration: 0.7, ease: 'back.out(1.7)' }, segStart + 0.9 + i * 0.15);
+        }
+        // fallback: simple fade-in
+        else {
+          gsap.set(s, { opacity: 0 });
+          masterTL.to(s, { opacity: 1, duration: 0.5, ease: 'power2.out' }, segStart + 0.9 + i * 0.15);
+        }
       });
       // Pulse
       masterTL.to(vis, { scale: 1.05, duration: dur * 0.4, ease: 'sine.inOut', yoyo: true, repeat: 1 }, segStart + 1.8);
@@ -441,17 +515,28 @@ body {
       segEls.push(bodyEl);
     }
 
-    // Subtitle (persistent bar, just change text)
+    // Subtitle (persistent bar — smooth text transition)
     if (seg.subZh) {
       masterTL.call(function() {
-        document.getElementById('subtitle-zh').textContent = seg.subZh;
-        document.getElementById('subtitle-en').textContent = seg.subEn || '';
-      }, null, segStart + 0.9);
-      masterTL.fromTo('#subtitle-bar',
-        { y: 10, opacity: 0 },
-        { y: 0, opacity: 1, duration: 0.4, ease: 'power2.out' },
-        segStart + 0.9
-      );
+        // Subtle fade-out → text change → fade-in for smooth transition
+        var zhEl = document.getElementById('subtitle-zh');
+        var enEl = document.getElementById('subtitle-en');
+        gsap.to('#subtitle-bar', { opacity: 0, duration: 0.18, ease: 'power2.in',
+          onComplete: function() {
+            zhEl.textContent = seg.subZh;
+            enEl.textContent = seg.subEn || '';
+            gsap.to('#subtitle-bar', { opacity: 1, duration: 0.25, ease: 'power2.out' });
+          }
+        });
+      }, null, segStart + 0.85);
+      // First segment: initial entrance from below
+      if (si === 0) {
+        masterTL.fromTo('#subtitle-bar',
+          { y: 10, opacity: 0 },
+          { y: 0, opacity: 1, duration: 0.5, ease: 'power2.out' },
+          segStart + 0.85
+        );
+      }
     }
 
     // === Phase: EXIT (at segStart + dur - 0.8s) ===
@@ -490,7 +575,7 @@ body {
 
       // Transition: the glow orb shifts color between segments
       var nextSeg = segments[si + 1];
-      if (nextSeg.titleColor) {
+      if (nextSeg && nextSeg.titleColor) {
         masterTL.to('#orb1', {
           '--temp': 'x', duration: 1.0, ease: 'power2.inOut',
           // Note: CSS custom property animation via GSAP needs attr:{}
@@ -522,6 +607,14 @@ body {
   /* ═══ Register for video export ═══ */
   window.__timelines = [masterTL];
   window.__totalDuration = t;
+  window.__segmentErrors = parseErrors;
+
+  // Global JS error handler — surface errors visibly
+  window.addEventListener('error', function(e) {
+    if (e.target === window) {
+      showError('动画脚本执行错误', e.message + '\n' + (e.filename || '') + ':' + (e.lineno || ''));
+    }
+  });
 })();
 </script>
 </body>

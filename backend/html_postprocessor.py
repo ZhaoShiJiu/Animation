@@ -10,10 +10,11 @@ html_postprocessor.py —— 动画 HTML 后处理增强管道
   6. 注入无障碍 & 视频导出 meta 标签
 
 用法：
-    from html_postprocessor import postprocess_html
+    from backend.html_postprocessor import postprocess_html
     enhanced = postprocess_html(raw_html)
 """
 
+import json
 import re
 import logging
 from typing import Optional
@@ -183,9 +184,62 @@ def _strip_markdown_fences(html: str) -> str:
     return html.strip()
 
 
+def _validate_json_segments(html: str) -> int:
+    """验证并报告 JSON segment 数据块的健康状态。返回无效 segment 数量。"""
+    pattern = re.compile(
+        r'<script\s+type=["\']application/json["\']\s+id=["\']seg-data-(\d+)["\']\s*>(.*?)</script>',
+        re.DOTALL | re.IGNORECASE,
+    )
+    bad_count = 0
+    for match in pattern.finditer(html):
+        seg_id = match.group(1)
+        content = match.group(2).strip()
+        if not content:
+            logger.warning("JSON segment %s 为空", seg_id)
+            bad_count += 1
+            continue
+        try:
+            json.loads(content)
+        except json.JSONDecodeError as exc:
+            logger.warning("JSON segment %s 解析失败: %s | 内容前100字符: %s",
+                          seg_id, exc, content[:100])
+            bad_count += 1
+    if bad_count > 0:
+        logger.warning("共 %d 个 JSON segment 存在格式问题，动画可能无法完整渲染", bad_count)
+    return bad_count
+
+
 # ---------------------------------------------------------------------------
 # 核心后处理流程
 # ---------------------------------------------------------------------------
+
+def _ensure_closing_tags(html: str):
+    """如果 LLM 截断了 HTML（缺少闭合标签），自动补全。返回 (html, 补全列表)。"""
+    closed = []
+
+    # Check and close </script> — the inline GSAP script must be closed
+    if '</script>' not in html:
+        # Find the last <script> tag position (the inline GSAP one)
+        last_script = html.rfind('<script>')
+        if last_script == -1:
+            last_script = html.rfind('<script ')
+        if last_script != -1:
+            # If the script tag is not closed, the JS won't execute.
+            # Close the IIFE and script tag.
+            html = html.rstrip() + '\n})();\n</script>'
+            closed.append('</script>+IIFE')
+            logger.warning("HTML 缺少 </script> 闭合标签，已自动补全（含 IIFE 闭合）")
+
+    if '</body>' not in html:
+        html = html.rstrip() + '\n</body>'
+        closed.append('</body>')
+
+    if '</html>' not in html:
+        html = html.rstrip() + '\n</html>'
+        closed.append('</html>')
+
+    return html, closed
+
 
 def postprocess_html(
     html: str,
@@ -259,9 +313,19 @@ def postprocess_html(
 
     # 6. 修复常见问题
     if fix_common_issues:
-        fix_count = _apply_common_fixes(html)
+        html, fix_count = _apply_common_fixes(html)
         if fix_count > 0:
             patches_applied.append(f"{fix_count} common fixes")
+
+    # 7. 验证 JSON segment 数据块
+    bad_segments = _validate_json_segments(html)
+    if bad_segments > 0:
+        patches_applied.append(f"{bad_segments} bad JSON segments")
+
+    # 8. 自动补全缺失的闭合标签（防止 LLM 截断导致 HTML 不完整）
+    html, closed_tags = _ensure_closing_tags(html)
+    if closed_tags:
+        patches_applied.append(f"auto-closed: {', '.join(closed_tags)}")
 
     if patches_applied:
         logger.info(
@@ -274,8 +338,8 @@ def postprocess_html(
     return html
 
 
-def _apply_common_fixes(html: str) -> int:
-    """修复常见的 HTML/CSS 问题。返回修复次数。"""
+def _apply_common_fixes(html: str):
+    """修复常见的 HTML/CSS 问题。返回 (修改后的html, 修复次数)。"""
     count = 0
 
     # 修复 1: 给 body 添加 overflow:hidden（防止视频导出时出现滚动条）
@@ -294,7 +358,7 @@ def _apply_common_fixes(html: str) -> int:
         html = re.sub(r'<p>\s*</p>', '', html)
         count += 1
 
-    return count
+    return html, count
 
 
 # ---------------------------------------------------------------------------

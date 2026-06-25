@@ -477,6 +477,15 @@ document.addEventListener('DOMContentLoaded', () => {
                     continue;
                 }
 
+                if (data.event === 'reset') {
+                    fullResponse = '';
+                    if (outputElement) {
+                        const codeEl = outputElement.querySelector('code');
+                        if (codeEl) codeEl.innerHTML = '';
+                    }
+                    continue;
+                }
+
                 if (data.error) throw new LLMParseError(data.error);
 
                 const token = data.token || '';
@@ -858,10 +867,55 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function extractHtmlFromResponse(responseText) {
-        const fencedMatch = responseText.match(/```(?:html)?\s*([\s\S]*?)```/i);
-        const candidate = fencedMatch ? fencedMatch[1] : responseText;
-        const htmlMatch = candidate.match(/<!doctype html[\s\S]*|<html[\s\S]*<\/html>/i);
-        return (htmlMatch ? htmlMatch[0] : candidate).trim();
+        if (!responseText) return '';
+
+        // Step 1: Strip leading/trailing markdown code fences
+        let text = responseText.trim();
+        // Remove leading ```html or ``` (with optional language)
+        text = text.replace(/^```(?:html|HTML)?\s*\n?/, '');
+        // Remove trailing ```
+        text = text.replace(/\n?```\s*$/, '');
+
+        // Step 2: If the text contains fenced code blocks, extract the HTML one
+        var fencePattern = /```(?:html|HTML)?\s*\n([\s\S]*?)\n```/g;
+        var fenceMatch;
+        var htmlBlocks = [];
+        while ((fenceMatch = fencePattern.exec(text)) !== null) {
+            var block = fenceMatch[1].trim();
+            if (/<html|<body|<div/i.test(block)) {
+                htmlBlocks.push(block);
+            }
+        }
+        if (htmlBlocks.length > 0) {
+            // Use the longest HTML-looking block
+            text = htmlBlocks.reduce(function(a, b) { return a.length >= b.length ? a : b; });
+        }
+
+        // Step 3: Find the HTML document boundaries
+        var htmlStart = text.search(/<html[^>]*>/i);
+        var htmlEnd = text.search(/<\/html>/i);
+        if (htmlStart !== -1 && htmlEnd !== -1 && htmlEnd > htmlStart) {
+            return text.substring(htmlStart, htmlEnd + 7).trim();
+        }
+
+        // Step 4: Fallback — find doctype + content
+        var doctypeMatch = text.match(/<!doctype\s+html[^>]*>/i);
+        if (doctypeMatch) {
+            var fromDoctype = text.substring(doctypeMatch.index);
+            // Try to find </html> end
+            var endIdx = fromDoctype.search(/<\/html>/i);
+            if (endIdx !== -1) {
+                return fromDoctype.substring(0, endIdx + 7).trim();
+            }
+            return fromDoctype.trim();
+        }
+
+        // Step 5: Last resort — if text looks like HTML, return as-is
+        if (/<body|<div|<style|<script/i.test(text)) {
+            return text;
+        }
+
+        return '';
     }
 
     function appendRetryPrompt(topic) {
@@ -1136,20 +1190,54 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function isHtmlContentValid(htmlContent) {
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(htmlContent, "text/html");
-
-        // 检查是否存在解析错误
-        const parseErrors = doc.querySelectorAll("parsererror");
-        if (parseErrors.length > 0) {
-            Logger.warn("HTML 解析失败：", parseErrors[0].textContent);
+        if (!htmlContent || typeof htmlContent !== 'string') {
+            Logger.warn("HTML 内容为空或类型错误");
             return false;
         }
 
-        // 可选：检测是否有 <html><body> 结构或是否为空
-        if (!doc.body || doc.body.innerHTML.trim() === "") {
-            Logger.warn("HTML 内容为空");
+        var trimmed = htmlContent.trim();
+        if (trimmed.length < 100) {
+            Logger.warn("HTML 内容过短:", trimmed.length, "字符");
             return false;
+        }
+
+        // Check for basic HTML document structure
+        var hasHtmlTag = /<html[^>]*>/i.test(trimmed);
+        var hasBodyTag = /<body[^>]*>/i.test(trimmed);
+        var hasClosingHtml = /<\/html>/i.test(trimmed);
+
+        if (!hasHtmlTag && !hasBodyTag) {
+            Logger.warn("HTML 缺少 <html> 或 <body> 标签");
+            return false;
+        }
+
+        if (!hasClosingHtml) {
+            Logger.warn("HTML 缺少 </html> 闭合标签");
+            // Don't fail on this alone — some browsers can handle it
+        }
+
+        // Try DOMParser as additional check
+        try {
+            var parser = new DOMParser();
+            var doc = parser.parseFromString(trimmed, "text/html");
+            var parseErrors = doc.querySelectorAll("parsererror");
+            if (parseErrors.length > 0) {
+                Logger.warn("DOMParser 解析错误:", parseErrors[0].textContent?.substring(0, 200));
+                return false;
+            }
+            if (!doc.body || doc.body.innerHTML.trim() === "") {
+                Logger.warn("HTML body 内容为空");
+                return false;
+            }
+        } catch (err) {
+            Logger.warn("DOMParser 解析异常:", err.message);
+            // Don't fail if DOMParser itself throws — it's very rare
+        }
+
+        // Check for GSAP (required for animation)
+        var hasGSAP = /gsap/i.test(trimmed);
+        if (!hasGSAP) {
+            Logger.warn("HTML 中未检测到 GSAP 引用，动画可能不工作");
         }
 
         return true;
@@ -1291,6 +1379,15 @@ document.addEventListener('DOMContentLoaded', () => {
                         forceHideWarning();
                         showWarning(translations.generationStarted[currentLang]);
                         queueWarningVisible = false;
+                    }
+                    continue;
+                }
+
+                if (data.event === 'reset') {
+                    fullResponse = '';
+                    if (outputElement) {
+                        const codeEl = outputElement.querySelector('code');
+                        if (codeEl) codeEl.innerHTML = '';
                     }
                     continue;
                 }

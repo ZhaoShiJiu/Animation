@@ -146,6 +146,37 @@
   }
 
   /**
+   * 验证 JSON segment 数据块是否可解析，输出警告日志。
+   * @param {string} html
+   * @returns {number} 无效 segment 数量
+   */
+  function validateSegments(html) {
+    var pattern = /<script\s+type=["']application\/json["']\s+id=["']seg-data-(\d+)["']\s*>([\s\S]*?)<\/script>/gi;
+    var badCount = 0;
+    var match;
+    while ((match = pattern.exec(html)) !== null) {
+      var segId = match[1];
+      var content = match[2].trim();
+      if (!content) {
+        console.warn('[ZSJ PostProcess] JSON segment ' + segId + ' is empty');
+        badCount++;
+        continue;
+      }
+      try {
+        JSON.parse(content);
+      } catch (e) {
+        console.warn('[ZSJ PostProcess] JSON segment ' + segId + ' parse failed:', e.message);
+        console.warn('[ZSJ PostProcess] Raw (first 150 chars):', content.substring(0, 150));
+        badCount++;
+      }
+    }
+    if (badCount > 0) {
+      console.warn('[ZSJ PostProcess] ' + badCount + ' JSON segment(s) have issues — animation may be incomplete');
+    }
+    return badCount;
+  }
+
+  /**
    * 对动画 HTML 进行全面的客户端增强。
    * @param {string} html - 原始 HTML
    * @param {{injectCSS?: boolean, injectNoise?: boolean, injectGSAPPatch?: boolean, fixOverflow?: boolean}} options
@@ -195,6 +226,19 @@
       if (html !== before) patches.push('overflow-fix');
     }
 
+    // 6. 验证 JSON segment 数据块
+    var badSegments = validateSegments(html);
+    if (badSegments > 0) {
+      patches.push(badSegments + ' bad JSON segments');
+    }
+
+    // 7. 自动补全缺失的闭合标签（LLM 截断防护）
+    var closeResult = ensureClosingTags(html);
+    html = closeResult.html;
+    if (closeResult.closed.length > 0) {
+      patches.push('auto-closed: ' + closeResult.closed.join(', '));
+    }
+
     if (patches.length > 0) {
       console.log('[ZSJ PostProcess] Applied patches:', patches.join(', '));
     }
@@ -202,9 +246,38 @@
     return html;
   }
 
+  /**
+   * 自动补全缺失的 </script> </body> </html> 闭合标签。
+   */
+  function ensureClosingTags(html) {
+    var closed = [];
+
+    if (!/<\/script>/i.test(html)) {
+      var lastScript = Math.max(html.lastIndexOf('<script>'), html.lastIndexOf('<script '));
+      if (lastScript !== -1) {
+        html = html.replace(/\s*$/, '') + '\n})();\n</script>';
+        closed.push('</script>+IIFE');
+      }
+    }
+
+    if (!/<\/body>/i.test(html)) {
+      html = html.replace(/\s*$/, '') + '\n</body>';
+      closed.push('</body>');
+    }
+
+    if (!/<\/html>/i.test(html)) {
+      html = html.replace(/\s*$/, '') + '\n</html>';
+      closed.push('</html>');
+    }
+
+    return { html: html, closed: closed };
+  }
+
   // Expose
   global.ZSJPostProcess = {
     enhance: enhance,
+    validateSegments: validateSegments,
+    ensureClosingTags: ensureClosingTags,
     hasCSSVariables: hasCSSVariables,
     hasGSAP: hasGSAP,
     hasTimelines: hasTimelines,
