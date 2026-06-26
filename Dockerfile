@@ -39,8 +39,8 @@ COPY requirements.txt .
 RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple && \
     pip install --no-cache-dir -r requirements.txt
 
-# 指定清华国内镜像下载Chromium，不走海外
-RUN PLAYWRIGHT_DOWNLOAD_HOST=https://mirrors.tuna.tsinghua.edu.cn/playwright python -m playwright install chromium --with-deps
+# 走宿主机SSH隧道直连Playwright官方下载浏览器
+  RUN HTTP_PROXY=http://host.docker.internal:1080 HTTPS_PROXY=http://host.docker.internal:1080 python -m playwright install chromium --with-deps
 
 # 切换淘宝npm国内镜像，再安装依赖
 RUN npm config set registry https://registry.npmmirror.com && \

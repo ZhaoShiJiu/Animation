@@ -1,6 +1,9 @@
 services:
   guanxianglu:
-    build: .
+    build:
+      context: .
+      extra_hosts:
+        - "host.docker.internal:host-gateway"
     ports:
       - "${HOST_PORT:-18000}:8000"
     volumes:
