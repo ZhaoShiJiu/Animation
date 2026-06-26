@@ -39,8 +39,9 @@ COPY requirements.txt .
 RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple && \
     pip install --no-cache-dir -r requirements.txt
 
-# 走宿主机SSH隧道直连Playwright官方下载浏览器
-  RUN HTTP_PROXY=http://host.docker.internal:1080 HTTPS_PROXY=http://host.docker.internal:1080 python -m playwright install chromium --with-deps
+# Playwright 浏览器下载走 npmmirror 国内镜像
+ENV PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright
+RUN python -m playwright install chromium --with-deps
 
 # 切换淘宝npm国内镜像，再安装依赖
 RUN npm config set registry https://registry.npmmirror.com && \
