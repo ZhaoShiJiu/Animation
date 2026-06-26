@@ -1,0 +1,21 @@
+services:
+  guanxianglu:
+    image: ccr.ccs.tencentyun.com/animation/animation-c:${IMAGE_VERSION:-latest}
+    ports:
+      - "${HOST_PORT:-18000}:8000"
+    volumes:
+      - ./credentials.json:/app/credentials.json:ro
+      - ./storage/exported_videos:/app/storage/exported_videos
+      - ./storage/temp_render:/app/storage/temp_render
+      - ./storage/logs:/app/storage/logs
+      - ./storage/shared_html:/app/storage/shared_html
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
