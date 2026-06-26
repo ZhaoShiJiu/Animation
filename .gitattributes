@@ -1,0 +1,12 @@
+# 默认行为：自动检测文本文件
+* text=auto
+
+# 自身强制 LF
+.gitattributes text eol=lf
+
+# Docker 相关文件强制 LF
+Dockerfile text eol=lf
+docker-compose.yml text eol=lf
+
+# Shell 脚本强制 LF
+*.sh text eol=lf

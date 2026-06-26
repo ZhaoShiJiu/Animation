@@ -35,14 +35,16 @@ RUN curl -fsSL https://mirrors.aliyun.com/nodejs-release/v${NODE_VERSION}/node-v
 # 复制依赖文件
 COPY requirements.txt .
 
-# 安装 Python 依赖
-RUN pip install --no-cache-dir -r requirements.txt
+# 切换阿里pypi源再安装依赖
+RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple && \
+    pip install --no-cache-dir -r requirements.txt
 
-# 安装 Playwright Chromium 浏览器
-RUN python -m playwright install chromium --with-deps
+# 指定清华国内镜像下载Chromium，不走海外
+RUN PLAYWRIGHT_DOWNLOAD_HOST=https://mirrors.tuna.tsinghua.edu.cn/playwright python -m playwright install chromium --with-deps
 
-# 全局安装 HyperFrames（锁定版本，加速首次渲染）
-RUN npm install -g hyperframes@0.6.121
+# 切换淘宝npm国内镜像，再安装依赖
+RUN npm config set registry https://registry.npmmirror.com && \
+    npm install -g hyperframes@0.6.121
 
 # 复制应用代码
 COPY . .
