@@ -1,0 +1,11 @@
+services:
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: animation-test
+    command: >
+      sh -c "pip install pytest pytest-asyncio pytest-mock httpx &&
+             python -m pytest tests/ -v"
+    environment:
+      - PYTHONUNBUFFERED=1

@@ -222,3 +222,4 @@ exported_videos/
 temp_render/
 CLAUDE.md
 .claude/
+.docs/

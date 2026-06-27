@@ -630,7 +630,7 @@ WORKDIR /app
 RUN apt-get install ffmpeg nodejs chromium-libs
 
 # Python 依赖
-COPY requirements.txt .
+COPY ../requirements.txt .
 RUN pip install -r requirements.txt
 
 # Playwright Chromium
@@ -640,7 +640,7 @@ RUN python -m playwright install chromium --with-deps
 RUN npm install -g hyperframes@0.6.121
 
 # 应用代码
-COPY . .
+COPY .. .
 RUN mkdir -p storage/exported_videos storage/temp_render storage/logs storage/shared_html
 
 EXPOSE 8000
