@@ -5,31 +5,31 @@ import json
 import pytest
 from unittest.mock import AsyncMock
 
-from backend.graph.nodes.validate import validate_copy, validate_segments
+from backend.graph.nodes.validate import validate_narrative, validate_direction, validate_segments
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# validate_copy
+# validate_narrative
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestValidateCopy:
-    """validate_copy 节点测试。"""
+    """validate_narrative 节点测试。"""
 
     @pytest.mark.asyncio
-    async def test_valid_copy_passes(self, sample_copy_json):
+    async def test_valid_copy_passes(self, sample_narrative_json):
         """合法文案应通过校验。"""
-        state = {"copy_json": sample_copy_json, "retry_count": 0}
-        result = await validate_copy(state)
-        assert result["copy_valid"] is True
+        state = {"narrative_json": sample_narrative_json, "retry_count": 0}
+        result = await validate_narrative(state)
+        assert result["narrative_valid"] is True
         assert result["validation_feedback"] is None
         assert result["retry_count"] == 0
 
     @pytest.mark.asyncio
     async def test_empty_copy_json_fails(self):
         """空字典应不通过。"""
-        state = {"copy_json": {}, "retry_count": 0}
-        result = await validate_copy(state)
-        assert result["copy_valid"] is False
+        state = {"narrative_json": {}, "retry_count": 0}
+        result = await validate_narrative(state)
+        assert result["narrative_valid"] is False
         assert "validation_feedback" in result
         assert result["retry_count"] == 1
 
@@ -37,51 +37,48 @@ class TestValidateCopy:
     async def test_missing_copy_json_fails(self):
         """完全缺失 copy_json 应不通过。"""
         state = {"retry_count": 0}
-        result = await validate_copy(state)
-        assert result["copy_valid"] is False
+        result = await validate_narrative(state)
+        assert result["narrative_valid"] is False
         assert result["retry_count"] == 1
 
     @pytest.mark.asyncio
     async def test_missing_title_fails(self):
         """缺少 title 字段应不通过。"""
         state = {
-            "copy_json": {"narrative_type": "problem_conflict", "acts": []},
+            "narrative_json": {"narrative_type": "problem_conflict", "acts": []},
             "retry_count": 0,
         }
-        result = await validate_copy(state)
-        assert result["copy_valid"] is False
+        result = await validate_narrative(state)
+        assert result["narrative_valid"] is False
 
     @pytest.mark.asyncio
     async def test_bad_act_structure_fails(self):
         """act 结构不完整应不通过。"""
         state = {
-            "copy_json": {
+            "narrative_json": {
                 "title": "测试",
                 "acts": [{"act": 1, "name": "缺少必填字段"}],
             },
             "retry_count": 0,
         }
-        result = await validate_copy(state)
-        assert result["copy_valid"] is False
+        result = await validate_narrative(state)
+        assert result["narrative_valid"] is False
 
     @pytest.mark.asyncio
     async def test_retry_count_increments(self):
         """校验失败时 retry_count 递增。"""
-        state = {"copy_json": {}, "retry_count": 2}
-        result = await validate_copy(state)
+        state = {"narrative_json": {}, "retry_count": 2}
+        result = await validate_narrative(state)
         assert result["retry_count"] == 3
 
     @pytest.mark.asyncio
-    async def test_pass_resets_retry_count(self):
+    async def test_pass_resets_retry_count(self, sample_narrative_json):
         """校验通过时 retry_count 重置为 0。"""
         state = {
-            "copy_json": {
-                "title": "重置测试",
-                "acts": [],
-            },
+            "narrative_json": sample_narrative_json,
             "retry_count": 5,
         }
-        result = await validate_copy(state)
+        result = await validate_narrative(state)
         assert result["retry_count"] == 0
 
 

@@ -15,25 +15,54 @@ class ChatRequest(BaseModel):
 
 # ── Two-stage generation models ──
 
-class CopyAct(BaseModel):
-    act: int
+# ── 三阶段拆分模型：纯文案 ──
+
+class NarrativeAct(BaseModel):
+    """单个五幕的纯文案——不含任何视觉描述。"""
+    act: int = Field(ge=1, le=5)
     name: str
-    goal: str
-    duration_hint: int
-    method_used: str
+    goal: str = ""
+    duration_hint: int = Field(default=10, ge=3, le=30)
+    method_used: str = ""
     narration: str
     narration_en: str = ""
-    visual_description: str
     on_screen_text: str = ""
+    emotion: str = ""
 
 
-class CopySchema(BaseModel):
+class NarrativeOutput(BaseModel):
+    """LLM 输出的顶层文案结构。"""
     narrative_type: str = "problem_conflict"
     title: str
-    visual_style: str = "cinematic"
-    color_palette: str = ""
     total_duration_hint: int = 60
-    acts: List[CopyAct] = []
+    acts: list[NarrativeAct] = Field(min_length=5, max_length=5)
+
+
+# ── 三阶段拆分模型：动画指导 ──
+
+class DirectionAct(BaseModel):
+    """单个五幕的结构化动画指导。"""
+    act: int = Field(ge=1, le=5)
+    composition: str = ""
+    main_element: str = ""
+    bg_color: str = Field(default="#FAFBFC", pattern=r"^#[0-9A-Fa-f]{6}$")
+    primary_color: str = Field(default="#0F172A", pattern=r"^#[0-9A-Fa-f]{6}$")
+    accent_color: str = Field(default="#2563EB", pattern=r"^#[0-9A-Fa-f]{6}$")
+    easing: str = ""
+    entrance_direction: str = ""
+    entrance_duration_range: str = ""
+    stagger: str = ""
+    camera_movement: str = ""
+    visual_technique: str = ""
+    svg_suggestion: str = ""
+    transition_from_previous: str = ""
+
+
+class DirectionOutput(BaseModel):
+    """LLM 输出的顶层动画指导结构。"""
+    visual_style: str = "cinematic"
+    color_palette_flow: str = ""
+    acts: list[DirectionAct] = Field(min_length=5, max_length=5)
 
 
 class PassphraseRequest(BaseModel):

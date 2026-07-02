@@ -23,15 +23,22 @@ def _retry_left(state: AnimationState) -> bool:
     return state.get("retry_count", 0) <= state.get("max_retries", 2)
 
 
-def after_validate_copy(state: AnimationState) -> str:
-    """copy 校验后的判定。"""
-    if state.get("copy_valid"):
+def after_validate_segments(state: AnimationState) -> str:
+    """segments 校验后的判定。"""
+    if state.get("segments_valid"):
         return TOKEN_PASSED
     return TOKEN_RETRY if _retry_left(state) else TOKEN_ABORT
 
 
-def after_validate_segments(state: AnimationState) -> str:
-    """segments 校验后的判定。"""
-    if state.get("segments_valid"):
+def after_validate_narrative(state: AnimationState) -> str:
+    """纯文案校验后的判定（三阶段拆分）。"""
+    if state.get("narrative_valid"):
+        return TOKEN_PASSED
+    return TOKEN_RETRY if _retry_left(state) else TOKEN_ABORT
+
+
+def after_validate_direction(state: AnimationState) -> str:
+    """动画指导校验后的判定（三阶段拆分）。"""
+    if state.get("direction_valid"):
         return TOKEN_PASSED
     return TOKEN_RETRY if _retry_left(state) else TOKEN_ABORT

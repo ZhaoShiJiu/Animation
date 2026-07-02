@@ -1,5 +1,5 @@
 # 使用官方 Python 3.10 基础镜像
-FROM python:3.10-slim
+FROM python:3.12-slim
 
 # Node.js 版本（可覆盖）
 ARG NODE_VERSION=22.15.0

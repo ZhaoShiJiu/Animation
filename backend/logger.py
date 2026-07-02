@@ -29,6 +29,7 @@ _LOG_DIR = os.path.join(_BASE_DIR, "storage", "logs")
 _LOG_FILE = os.path.join(_LOG_DIR, "app.log")
 _LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
 _LOG_BACKUP_COUNT = 5
+_LOG_MAX_AGE_DAYS = 30  # 超过 30 天的日志自动清理
 _LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s:%(funcName)s:%(lineno)d | %(message)s"
 _LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -78,6 +79,20 @@ class _ColoredFormatter(logging.Formatter):
 _log_initialized = False
 
 
+def _cleanup_old_logs():
+    """清理超过 _LOG_MAX_AGE_DAYS 天的旧日志文件。"""
+    try:
+        import time
+        cutoff = time.time() - _LOG_MAX_AGE_DAYS * 86400
+        for fname in os.listdir(_LOG_DIR):
+            fpath = os.path.join(_LOG_DIR, fname)
+            if os.path.isfile(fpath) and fname.startswith("app.log"):
+                if os.path.getmtime(fpath) < cutoff:
+                    os.remove(fpath)
+    except Exception:
+        pass  # 清理失败不影响日志初始化
+
+
 def _init_logging():
     """配置根 logger 的 handler（仅执行一次）。"""
     global _log_initialized
@@ -87,6 +102,9 @@ def _init_logging():
 
     # 确保日志目录存在
     os.makedirs(_LOG_DIR, exist_ok=True)
+
+    # 清理过期日志文件
+    _cleanup_old_logs()
 
     # 读取日志级别
     log_level_str = os.environ.get("LOG_LEVEL", "").upper()

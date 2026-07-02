@@ -3,7 +3,7 @@ test_routing.py — LangGraph 条件路由逻辑测试。
 """
 import pytest
 from backend.graph.edges.routing import (
-    after_validate_copy,
+    after_validate_narrative,
     after_validate_segments,
     _retry_left,
     TOKEN_PASSED,
@@ -43,33 +43,33 @@ class TestRetryLeft:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# after_validate_copy
+# after_validate_narrative
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestAfterValidateCopy:
     """文案校验路由测试。"""
 
-    def test_pass_when_copy_valid(self):
-        state = {"copy_valid": True}
-        assert after_validate_copy(state) == TOKEN_PASSED
+    def test_pass_when_narrative_valid(self):
+        state = {"narrative_valid": True}
+        assert after_validate_narrative(state) == TOKEN_PASSED
 
     def test_retry_when_invalid_and_retries_left(self):
-        state = {"copy_valid": False, "retry_count": 1, "max_retries": 2}
-        assert after_validate_copy(state) == TOKEN_RETRY
+        state = {"narrative_valid": False, "retry_count": 1, "max_retries": 2}
+        assert after_validate_narrative(state) == TOKEN_RETRY
 
     def test_abort_when_invalid_and_retries_exhausted(self):
-        state = {"copy_valid": False, "retry_count": 3, "max_retries": 2}
-        assert after_validate_copy(state) == TOKEN_ABORT
+        state = {"narrative_valid": False, "retry_count": 3, "max_retries": 2}
+        assert after_validate_narrative(state) == TOKEN_ABORT
 
     def test_first_attempt_copy_invalid(self):
         """第一次尝试（retry_count=0）文案无效——可以重试。"""
-        state = {"copy_valid": False, "retry_count": 0, "max_retries": 2}
-        assert after_validate_copy(state) == TOKEN_RETRY
+        state = {"narrative_valid": False, "retry_count": 0, "max_retries": 2}
+        assert after_validate_narrative(state) == TOKEN_RETRY
 
-    def test_copy_valid_overrides_retry_count(self):
+    def test_narrative_valid_overrides_retry_count(self):
         """文案有效时，即使 retry_count 超标也 pass。"""
-        state = {"copy_valid": True, "retry_count": 5, "max_retries": 2}
-        assert after_validate_copy(state) == TOKEN_PASSED
+        state = {"narrative_valid": True, "retry_count": 5, "max_retries": 2}
+        assert after_validate_narrative(state) == TOKEN_PASSED
 
 
 # ═══════════════════════════════════════════════════════════════════════════

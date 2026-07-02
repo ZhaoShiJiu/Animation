@@ -70,8 +70,20 @@ async def analyze_topic(state: AnimationState) -> dict:
         logger.info("analyze_topic 完成 | category=%s | difficulty=%s",
                     outline.get("category"), outline.get("difficulty"))
         return {"outline": outline}
+    except json.JSONDecodeError as exc:
+        logger.warning("analyze_topic JSON 解析失败: %s，使用默认 outline", exc)
+        return {
+            "outline": {
+                "category": "未分类",
+                "difficulty": "标准",
+                "core_idea": topic,
+                "visual_metaphors": [],
+                "key_terms": [],
+                "narrative_angle": "好奇心驱动",
+            }
+        }
     except Exception as exc:
-        logger.warning("analyze_topic 失败: %s，使用默认 outline", exc)
+        logger.warning("analyze_topic LLM 调用失败: %s，使用默认 outline", exc)
         return {
             "outline": {
                 "category": "未分类",
@@ -158,8 +170,19 @@ async def analyze_paper(state: AnimationState) -> dict:
         logger.info("analyze_paper 完成 | category=%s | summary_len=%d",
                     outline.get("category"), len(outline.get("paper_summary", "")))
         return {"outline": outline}
+    except json.JSONDecodeError as exc:
+        logger.warning("analyze_paper JSON 解析失败: %s", exc)
+        return {
+            "outline": {
+                "category": "未分类",
+                "core_idea": filename,
+                "visual_metaphors": [],
+                "key_terms": [],
+                "paper_summary": pdf_text[:200],
+            }
+        }
     except Exception as exc:
-        logger.warning("analyze_paper 失败: %s", exc)
+        logger.warning("analyze_paper LLM 调用失败: %s", exc)
         return {
             "outline": {
                 "category": "未分类",

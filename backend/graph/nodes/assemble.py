@@ -20,15 +20,15 @@ async def assemble_html(state: AnimationState) -> dict:
     """
     segments = state.get("segments", [])
     settings = state.get("settings", {})
-    copy_json = state.get("copy_json", {})
+    narrative_json = state.get("narrative_json", {})
 
     if not segments or len(segments) < 3:
         return {"error": "没有足够的数据来拼装 HTML（segments 为空或过少）"}
 
-    # 从 copy_json 提取时长提示（两阶段图），否则用默认值
+    # 从 narrative_json 提取时长提示，否则用默认值
     seg_durations = state.get("seg_durations", None)
-    if seg_durations is None and copy_json:
-        acts = copy_json.get("acts", [])
+    if seg_durations is None and narrative_json:
+        acts = narrative_json.get("acts", [])
         if acts:
             seg_durations = [act.get("duration_hint", 10) for act in acts[:5]]
 
@@ -36,6 +36,6 @@ async def assemble_html(state: AnimationState) -> dict:
         html_content = _assemble_animation_html(segments, settings, seg_durations)
         logger.info("assemble_html 完成 | html_size=%d", len(html_content))
         return {"html": html_content}
-    except Exception as exc:
-        logger.exception("assemble_html 失败")
+    except (KeyError, ValueError, TypeError, RuntimeError) as exc:
+        logger.exception("assemble_html 模板拼装失败")
         return {"error": f"HTML 拼装失败: {exc}"}

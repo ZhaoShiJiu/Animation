@@ -18,13 +18,15 @@ from fastapi import Request
 logger = logging.getLogger(__name__)
 
 # 需要向前端流式输出 token 的节点名
-_STREAMING_NODES = {"generate_segments", "generate_copy", "generate_animation"}
+_STREAMING_NODES = {"generate_segments", "generate_animation", "generate_narrative", "generate_direction"}
 
 # 所有图中的业务节点名（用于过滤掉内部链如 ChatOpenAI、RunnableSequence 等）
 _GRAPH_NODES = {
     "analyze_topic", "analyze_paper",
-    "generate_copy", "generate_segments", "generate_animation",
-    "validate_copy", "validate_segments", "validate_animation",
+    "generate_segments", "generate_animation",
+    "generate_narrative", "generate_direction",
+    "validate_segments", "validate_animation",
+    "validate_narrative", "validate_direction",
     "assemble", "postprocess",
 }
 
@@ -152,14 +154,9 @@ async def stream_graph_to_sse(compiled_graph, input_state: dict, request: Reques
                 if isinstance(output, dict):
                     accumulated_state.update(output)
 
-            # ── LLM stream 事件（兜底，理论上不会触发）──
+            # ── LLM stream 事件（节点 push 路径已覆盖，此处跳过避免重复）──
             elif kind == "on_chat_model_stream":
-                logger.info("on_chat_model_stream 触发了（token 应由节点 push，此路径仅作兜底）")
-                chunk = event["data"]["chunk"]
-                content = chunk.content if hasattr(chunk, "content") else ""
-                if content and current_node in _STREAMING_NODES:
-                    payload = json.dumps({"token": content}, ensure_ascii=False)
-                    yield f"data: {payload}\n\n"
+                pass  # token 由节点内 stream_ctx.push_token() 发送，无需兜底
 
     finally:
         if not task.done():
@@ -167,10 +164,15 @@ async def stream_graph_to_sse(compiled_graph, input_state: dict, request: Reques
 
     # ── 图执行结束后，从 state 取出最终结果 ──
     if accumulated_state.get("html"):
-        payload = json.dumps(
-            {"token": "\n\n" + accumulated_state["html"]}, ensure_ascii=False
-        )
-        yield f"data: {payload}\n\n"
+        html = accumulated_state["html"]
+        # 分块发送大型 HTML，避免单次 SSE 消息阻塞事件循环
+        _CHUNK_SIZE = 4096
+        # 先发送换行分隔符，前端用此标记 JSON 流结束
+        yield f"data: {json.dumps({'token': '\n\n'}, ensure_ascii=False)}\n\n"
+        for i in range(0, len(html), _CHUNK_SIZE):
+            chunk = html[i:i + _CHUNK_SIZE]
+            payload = json.dumps({"token": chunk}, ensure_ascii=False)
+            yield f"data: {payload}\n\n"
     elif accumulated_state.get("error"):
         yield f"data: {json.dumps({'error': accumulated_state['error']}, ensure_ascii=False)}\n\n"
 

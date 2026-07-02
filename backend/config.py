@@ -7,6 +7,8 @@ import os
 
 import pytz
 
+from backend.design_system import DURATION_SECONDS_HINT
+
 # ── 时区 ──
 shanghai_tz = pytz.timezone("Asia/Shanghai")
 
@@ -23,13 +25,13 @@ MAX_PAPER_UPLOAD_BYTES = credentials.get("MAX_PAPER_UPLOAD_BYTES", 20 * 1024 * 1
 MAX_PAPER_TEXT_CHARS = credentials.get("MAX_PAPER_TEXT_CHARS", 120000)
 ACCESS_PASSPHRASES = credentials.get("ACCESS_PASSPHRASES")
 MAX_CONCURRENT_EXPORT_TASKS = credentials.get("MAX_CONCURRENT_EXPORT_TASKS", 1)
+REDIS_URL = credentials.get("REDIS_URL", "")
 
 # ── 信号量 ──
 generation_semaphore = asyncio.Semaphore(MAX_CONCURRENT_GENERATION_TASKS)
 export_semaphore = asyncio.Semaphore(MAX_CONCURRENT_EXPORT_TASKS)
 
 # ── 分享配置 ──
-shared_html_links = {}
 SHARE_STORAGE_DIR = os.path.join(_ROOT_DIR, "storage", "shared_html")
 SHARE_CLEANUP_INTERVAL_SECONDS = 300
 SHARE_EXPIRATION_SECONDS = {
@@ -55,16 +57,28 @@ VIDEO_EXPIRATION_SECONDS = {
     "7d": 7 * 24 * 60 * 60,
 }
 
-# ── 动画配置 ──
-DURATION_SECONDS_HINT = {
-    "preview": 12,
-    "short": 30,
-    "medium": 60,
-    "long": 90,
-}
+# ── Redis 客户端（可选）──
+_redis_client = None
 
-# ── LLM 客户端 ──
-# LLM 调用统一由 backend/graph/__init__.py 的 ChatOpenAI 管理
+
+def get_redis():
+    """获取 Redis 客户端（如果配置了 REDIS_URL）。"""
+    global _redis_client
+    if _redis_client is not None:
+        return _redis_client
+    if REDIS_URL:
+        try:
+            import redis.asyncio as aioredis
+            _redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+        except ImportError:
+            _redis_client = False  # 标记为不可用
+    else:
+        _redis_client = False
+    return _redis_client or None
+
+
+# ── 共享链接内存缓存（当 Redis 不可用时的 fallback）──
+shared_html_links: dict = {}
 
 if not API_KEY or API_KEY.startswith("sk-REPLACE_ME") or API_KEY == "<your-api-key>":
     raise RuntimeError(

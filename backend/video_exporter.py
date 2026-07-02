@@ -21,11 +21,10 @@ from datetime import datetime, timedelta
 from typing import Optional, Callable, Awaitable
 
 import pytz
+from backend.config import shanghai_tz
 from backend.logger import get_logger
 
 logger = get_logger(__name__)
-
-shanghai_tz = pytz.timezone("Asia/Shanghai")
 
 # ---------------------------------------------------------------------------
 # HyperFrames project skeleton files
@@ -575,6 +574,9 @@ class VideoExporter:
                     continue
                 retention = meta.get("retention_seconds") or default_max_age_seconds
                 created_at = datetime.fromisoformat(created_str)
+                # 如果是 naive datetime，假定为上海时区
+                if created_at.tzinfo is None:
+                    created_at = shanghai_tz.localize(created_at)
                 if now - created_at > timedelta(seconds=retention):
                     video_id = meta.get("video_id", filename[:-5])
                     self.delete_video(video_id)

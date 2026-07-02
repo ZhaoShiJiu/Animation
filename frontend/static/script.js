@@ -238,9 +238,6 @@ document.addEventListener('DOMContentLoaded', () => {
     let pendingExportHtml = '';
     let latestShareDetails = null;
     let previewConfirmResolver = null;
-    let currentCopyJson = null;
-    let copyReviewElement = null;
-    let isCopyEditing = false;
 
     function unlockPassphraseGate() {
         passphraseGate?.classList.add('hidden');
@@ -511,10 +508,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const outputElement = appendOutputBlock();
 
         try {
-            const response = await fetch(`${config.apiBaseUrl}/generate`, {
+            const response = await fetch(`${config.apiBaseUrl}/generate/full`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ topic: topic, history: conversationHistory, settings: getGenerationSettings() }),
+                body: JSON.stringify({ topic: topic, settings: getGenerationSettings() }),
                 signal: activeGenerationController.signal
             });
             await consumeGenerationResponse(response, topic, agentThinkingMessage, outputElement);
@@ -666,8 +663,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (pendingGenerationIsInitial) switchToChatView();
 
         conversationHistory.push({ role: 'user', content: topic });
-        // Use the new two-stage flow: generate copy first, then animation
-        generateCopy(topic);
+        // 使用三阶段全流程：文案→指导→动画
+        startGeneration(topic);
         if (pendingGenerationIsInitial) {
             initialInput.value = '';
             placeholderContainer?.classList?.remove('hidden');
@@ -764,7 +761,20 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function tryCopy(text, btn) {
-        // 方法1: execCommand
+        // 方法1: Clipboard API（现代浏览器标准方案）
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+            navigator.clipboard.writeText(text).then(
+                function () { onCopyDone(btn, true); },
+                function () { fallbackCopy(text, btn); }
+            );
+            return;
+        }
+
+        fallbackCopy(text, btn);
+    }
+
+    function fallbackCopy(text, btn) {
+        // 方法2: execCommand（旧浏览器兜底）
         var ta = document.createElement('textarea');
         ta.value = text;
         ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0;pointer-events:none;';
@@ -781,15 +791,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (ok) {
             onCopyDone(btn, true);
-            return;
-        }
-
-        // 方法2: Clipboard API
-        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-            navigator.clipboard.writeText(text).then(
-                function () { onCopyDone(btn, true); },
-                function () { onCopyDone(btn, false); }
-            );
         } else {
             onCopyDone(btn, false);
         }
@@ -1133,17 +1134,8 @@ document.addEventListener('DOMContentLoaded', () => {
     function appendAnimationPlayer(htmlContent, topic) {
         Logger.info('Appending animation player:', topic);
 
-        // === 客户端 HTML 后处理增强 ===
-        try {
-            htmlContent = ZSJPostProcess.enhance(htmlContent, {
-                injectCSS: true,
-                injectNoise: true,
-                injectGSAPPatch: true,
-                fixOverflow: true
-            });
-        } catch (err) {
-            Logger.warn('Post-process enhancement failed:', err);
-        }
+        // 服务器端 backend/html_postprocessor.py 已处理所有 HTML 增强
+        // 客户端不再重复后处理
 
         const node = templates.player.content.cloneNode(true);
         const playerElement = node.firstElementChild;
@@ -1244,380 +1236,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // ── Two-Stage Generation: Copy → Animation ──
-
-    async function generateCopy(topic) {
-        Logger.info('Stage 1: Generating copy for:', topic);
-        appendUserMessage(topic);
-        const agentThinkingMessage = appendAgentStatus(translations.agentThinking[currentLang]);
-        const submitButton = document.querySelector('.submit-button');
-        activeGenerationController = new AbortController();
-        if (submitButton) {
-            submitButton.disabled = true;
-            submitButton.classList.add('disabled');
-        }
-        if (stopGenerationButton) stopGenerationButton.hidden = false;
-        accumulatedCode = '';
-        const outputElement = appendOutputBlock();
-
-        try {
-            const response = await fetch(`${config.apiBaseUrl}/generate/copy`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ topic: topic, settings: getGenerationSettings() }),
-                signal: activeGenerationController.signal
-            });
-            await consumeCopyResponse(response, topic, agentThinkingMessage, outputElement);
-        } catch (error) {
-            Logger.error("Copy generation failed:", error);
-            if (agentThinkingMessage) agentThinkingMessage.remove();
-
-            let displayMessage = translations.errorFetchFailed[currentLang];
-            if (error.name === 'AbortError') {
-                displayMessage = translations.generationStopped[currentLang];
-            } else if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
-                displayMessage = translations.errorFetchFailed[currentLang];
-            } else if (error.message.includes('status: 429')) {
-                displayMessage = translations.errorTooManyRequests[currentLang];
-            } else if (error instanceof LLMParseError) {
-                displayMessage = translations.errorLLMParseError[currentLang];
-            }
-
-            showWarning(displayMessage);
-            appendErrorMessage(translations.errorMessage[currentLang], error);
-            if (outputElement) markOutputAsComplete(outputElement);
-        } finally {
-            if (submitButton) {
-                submitButton.disabled = false;
-                submitButton.classList.remove('disabled');
-            }
-            if (stopGenerationButton) stopGenerationButton.hidden = true;
-            activeGenerationController = null;
-        }
-    }
-
-    async function consumeCopyResponse(response, displayTopic, agentThinkingMessage, outputElement) {
-        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        let fullResponse = '';
-        let queueWarningVisible = false;
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n\n');
-            buffer = lines.pop();
-
-            for (const line of lines) {
-                if (!line.startsWith('data: ')) continue;
-
-                const jsonStr = line.substring(6);
-                if (jsonStr.includes('[DONE]')) {
-                    conversationHistory.push({ role: 'assistant', content: fullResponse });
-                    markOutputAsComplete(outputElement);
-
-                    // Parse the accumulated JSON
-                    let copyJson = null;
-                    try {
-                        // Try to extract JSON from the response (handle possible markdown wrapping)
-                        let jsonText = fullResponse;
-                        const jsonMatch = fullResponse.match(/```(?:json)?\s*([\s\S]*?)```/);
-                        if (jsonMatch) jsonText = jsonMatch[1];
-                        // Find the outermost { ... }
-                        const braceStart = jsonText.indexOf('{');
-                        const braceEnd = jsonText.lastIndexOf('}');
-                        if (braceStart !== -1 && braceEnd > braceStart) {
-                            jsonText = jsonText.substring(braceStart, braceEnd + 1);
-                        }
-                        copyJson = JSON.parse(jsonText);
-                    } catch (err) {
-                        Logger.error('Failed to parse copy JSON:', err, 'Raw (first 200 chars):', fullResponse.substring(0, 200));
-                        appendRetryPrompt(displayTopic);
-                        scrollToBottom();
-                        return;
-                    }
-
-                    if (!copyJson || !copyJson.acts || !copyJson.acts.length) {
-                        Logger.warn('Invalid copy JSON structure:', copyJson);
-                        appendRetryPrompt(displayTopic);
-                        scrollToBottom();
-                        return;
-                    }
-
-                    currentCopyJson = copyJson;
-                    appendCopyReview(copyJson, displayTopic);
-                    scrollToBottom();
-                    return;
-                }
-
-                let data;
-                try {
-                    data = JSON.parse(jsonStr);
-                } catch (err) {
-                    Logger.error('Failed to parse JSON:', jsonStr.substring(0, 200));
-                    throw new LLMParseError('Invalid response format from server.');
-                }
-
-                if (data.event === 'queued') {
-                    queueWarningVisible = true;
-                    showWarning(translations.generationQueued[currentLang], {
-                        persistent: true,
-                        blocking: true,
-                        loading: true,
-                        cancelable: true,
-                        cancelText: translations.cancelQueuedTask[currentLang],
-                    });
-                    continue;
-                }
-
-                if (data.event === 'started') {
-                    if (queueWarningVisible) {
-                        forceHideWarning();
-                        showWarning(translations.generationStarted[currentLang]);
-                        queueWarningVisible = false;
-                    }
-                    continue;
-                }
-
-                if (data.event === 'reset') {
-                    fullResponse = '';
-                    if (outputElement) {
-                        const codeEl = outputElement.querySelector('code');
-                        if (codeEl) codeEl.innerHTML = '';
-                    }
-                    continue;
-                }
-
-                if (data.error) throw new LLMParseError(data.error);
-
-                const token = data.token || '';
-                if (agentThinkingMessage) agentThinkingMessage.remove();
-                fullResponse += token;
-                updateOutputBlock(outputElement, token);
-            }
-        }
-    }
-
-    function appendCopyReview(copyJson, topic) {
-        const node = templates['copy-review']?.content?.cloneNode(true);
-        if (!node) {
-            Logger.error('copy-review template not found');
-            return;
-        }
-        const element = node.firstElementChild;
-        copyReviewElement = element;
-
-        // Update header
-        const titleEl = element.querySelector('.copy-title');
-        if (titleEl) titleEl.textContent = copyJson.title || topic;
-
-        const narrativeTypeEl = element.querySelector('.copy-narrative-type');
-        if (narrativeTypeEl) {
-            const typeMap = { problem_conflict: '问题冲突型' };
-            narrativeTypeEl.textContent = typeMap[copyJson.narrative_type] || copyJson.narrative_type || '';
-        }
-
-        const durationEl = element.querySelector('.copy-duration');
-        if (durationEl) durationEl.textContent = `约 ${copyJson.total_duration_hint || 60} 秒`;
-
-        // Build act cards
-        const actsContainer = element.querySelector('.acts-container');
-        if (actsContainer && copyJson.acts) {
-            const actNames = ['认知爆破', '延迟满足', '层层揭秘', '高潮揭晓', '记忆钉'];
-            const actIcons = ['💥', '🔮', '🔍', '💡', '📌'];
-
-            copyJson.acts.forEach((act, index) => {
-                const card = document.createElement('div');
-                card.className = 'act-card';
-                card.dataset.actIndex = index;
-                card.innerHTML = `
-                    <div class="act-card-header">
-                        <span class="act-number">${actIcons[index] || '▶'} 第${act.act || index + 1}幕</span>
-                        <span class="act-name">${act.name || actNames[index] || ''}</span>
-                        <span class="act-goal">${act.goal || ''}</span>
-                        <span class="act-duration-hint">~${act.duration_hint || 0}s</span>
-                    </div>
-                    <div class="act-card-body">
-                        <div class="act-field">
-                            <label>手法</label>
-                            <span class="act-method" data-field="method_used">${act.method_used || ''}</span>
-                        </div>
-                        <div class="act-field">
-                            <label>旁白（中文）</label>
-                            <span class="act-narration" data-field="narration">${act.narration || ''}</span>
-                        </div>
-                        <div class="act-field">
-                            <label>旁白（英文）</label>
-                            <span class="act-narration-en" data-field="narration_en">${act.narration_en || ''}</span>
-                        </div>
-                        <div class="act-field">
-                            <label>画面描述</label>
-                            <span class="act-visual" data-field="visual_description">${act.visual_description || ''}</span>
-                        </div>
-                        <div class="act-field">
-                            <label>画面大字</label>
-                            <span class="act-on-screen" data-field="on_screen_text">${act.on_screen_text || ''}</span>
-                        </div>
-                    </div>
-                `;
-                actsContainer.appendChild(card);
-            });
-        }
-
-        // Wire up buttons
-        const editButton = element.querySelector('.copy-edit-toggle');
-        if (editButton) {
-            editButton.addEventListener('click', () => toggleCopyEdit());
-        }
-
-        const regenerateButton = element.querySelector('.copy-regenerate');
-        if (regenerateButton) {
-            regenerateButton.addEventListener('click', () => {
-                element.remove();
-                copyReviewElement = null;
-                currentCopyJson = null;
-                generateCopy(topic);
-            });
-        }
-
-        const generateAnimButton = element.querySelector('.copy-generate-animation');
-        if (generateAnimButton) {
-            generateAnimButton.addEventListener('click', () => {
-                const editedCopy = isCopyEditing ? exportEditedCopy() : currentCopyJson;
-                if (editedCopy) {
-                    currentCopyJson = editedCopy;
-                    generateAnimationFromCopy(editedCopy);
-                }
-            });
-        }
-
-        chatLog.appendChild(element);
-        attachCopyButton(element);
-        scrollToBottom();
-    }
-
-    function toggleCopyEdit() {
-        if (!copyReviewElement) return;
-
-        isCopyEditing = !isCopyEditing;
-        const editButton = copyReviewElement.querySelector('.copy-edit-toggle span');
-        const allFields = copyReviewElement.querySelectorAll('.act-card-body span[data-field]');
-
-        if (isCopyEditing) {
-            if (editButton) editButton.textContent = '完成编辑';
-            copyReviewElement.classList.add('is-editing');
-            // Convert spans to inputs/textareas
-            allFields.forEach(span => {
-                const field = span.dataset.field;
-                const value = span.textContent;
-                const isLong = field === 'visual_description' || field === 'narration' || field === 'narration_en';
-                const input = document.createElement(isLong ? 'textarea' : 'input');
-                input.type = isLong ? undefined : 'text';
-                input.value = value;
-                input.dataset.field = field;
-                input.className = 'act-edit-field';
-                if (isLong) input.rows = 3;
-                span.replaceWith(input);
-            });
-        } else {
-            if (editButton) editButton.textContent = '编辑文案';
-            copyReviewElement.classList.remove('is-editing');
-            // Convert inputs back to spans
-            const allInputs = copyReviewElement.querySelectorAll('.act-edit-field');
-            allInputs.forEach(input => {
-                const field = input.dataset.field;
-                const value = input.value;
-                const span = document.createElement('span');
-                span.textContent = value;
-                span.dataset.field = field;
-                span.className = `act-${field}`;
-                input.replaceWith(span);
-            });
-        }
-    }
-
-    function exportEditedCopy() {
-        if (!copyReviewElement || !currentCopyJson) return null;
-
-        const editedCopy = JSON.parse(JSON.stringify(currentCopyJson)); // Deep clone
-
-        const actCards = copyReviewElement.querySelectorAll('.act-card');
-        actCards.forEach((card, index) => {
-            if (index >= editedCopy.acts.length) return;
-            const act = editedCopy.acts[index];
-
-            const methodEl = card.querySelector('[data-field="method_used"]');
-            if (methodEl) act.method_used = methodEl.textContent || methodEl.value || '';
-
-            const narrationEl = card.querySelector('[data-field="narration"]');
-            if (narrationEl) act.narration = narrationEl.textContent || narrationEl.value || '';
-
-            const narrationEnEl = card.querySelector('[data-field="narration_en"]');
-            if (narrationEnEl) act.narration_en = narrationEnEl.textContent || narrationEnEl.value || '';
-
-            const visualEl = card.querySelector('[data-field="visual_description"]');
-            if (visualEl) act.visual_description = visualEl.textContent || visualEl.value || '';
-
-            const onScreenEl = card.querySelector('[data-field="on_screen_text"]');
-            if (onScreenEl) act.on_screen_text = onScreenEl.textContent || onScreenEl.value || '';
-        });
-
-        return editedCopy;
-    }
-
-    async function generateAnimationFromCopy(copyJson) {
-        Logger.info('Stage 2: Generating animation from copy');
-        const agentThinkingMessage = appendAgentStatus(translations.agentThinking[currentLang]);
-        const submitButton = document.querySelector('.submit-button');
-        activeGenerationController = new AbortController();
-        if (submitButton) {
-            submitButton.disabled = true;
-            submitButton.classList.add('disabled');
-        }
-        if (stopGenerationButton) stopGenerationButton.hidden = false;
-        accumulatedCode = '';
-        const outputElement = appendOutputBlock();
-
-        try {
-            const response = await fetch(`${config.apiBaseUrl}/generate/animation`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ copy_json: copyJson, settings: getGenerationSettings() }),
-                signal: activeGenerationController.signal
-            });
-            // Reuse the same SSE consumer from the original flow
-            await consumeGenerationResponse(response, copyJson.title || '动画', agentThinkingMessage, outputElement);
-        } catch (error) {
-            Logger.error("Animation from copy failed:", error);
-            if (agentThinkingMessage) agentThinkingMessage.remove();
-
-            let displayMessage = translations.errorFetchFailed[currentLang];
-            if (error.name === 'AbortError') {
-                displayMessage = translations.generationStopped[currentLang];
-            } else if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
-                displayMessage = translations.errorFetchFailed[currentLang];
-            } else if (error.message.includes('status: 429')) {
-                displayMessage = translations.errorTooManyRequests[currentLang];
-            } else if (error instanceof LLMParseError) {
-                displayMessage = translations.errorLLMParseError[currentLang];
-            }
-
-            showWarning(displayMessage);
-            appendErrorMessage(translations.errorMessage[currentLang], error);
-            if (outputElement) markOutputAsComplete(outputElement);
-        } finally {
-            if (submitButton) {
-                submitButton.disabled = false;
-                submitButton.classList.remove('disabled');
-            }
-            if (stopGenerationButton) stopGenerationButton.hidden = true;
-            activeGenerationController = null;
-        }
-    }
 
     const scrollToBottom = () => chatLog.scrollTo({ top: chatLog.scrollHeight, behavior: 'smooth' });
 

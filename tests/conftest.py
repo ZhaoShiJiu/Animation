@@ -54,14 +54,27 @@ def patch_config(monkeypatch):
 def mock_llm(mocker):
     """Mock backend.graph.get_llm() 返回 AsyncMock。
 
-    使用方式：
-        llm = mock_llm()
-        llm.ainvoke.return_value = FakeAIMessage(content="...")
-        llm.astream.return_value = fake_async_stream([...])
+    需要 patch 所有 import get_llm 的模块路径，
+    因为各节点使用 ``from backend.graph import get_llm`` 在模块加载时绑定。
+
+    注意：astream 需设为普通 MagicMock（非 AsyncMock），
+    因为 astream() 直接返回 async generator 而非 coroutine。
     """
+    from unittest.mock import MagicMock
     mock_instance = AsyncMock()
-    mock_get = mocker.patch("backend.graph.get_llm")
-    mock_get.return_value = mock_instance
+    mock_instance.astream = MagicMock()  # 返回 async generator，非 coroutine
+    # 清空 LLM 实例缓存
+    from backend.graph import clear_llm_cache
+    clear_llm_cache()
+    # Patch 所有引用路径
+    for target in (
+        "backend.graph.get_llm",
+        "backend.graph.nodes.plan.get_llm",
+        "backend.graph.nodes.generate_segments.get_llm",
+        "backend.graph.nodes.generate_narrative.get_llm",
+        "backend.graph.nodes.generate_direction.get_llm",
+    ):
+        mocker.patch(target, return_value=mock_instance)
     return mock_instance
 
 
@@ -140,69 +153,53 @@ def sample_html():
 
 
 @pytest.fixture
-def sample_copy_json():
-    """返回一个合法的 CopySchema 测试数据。"""
+def sample_narrative_json():
+    """返回一个合法的 NarrativeOutput 测试数据。"""
     return {
         "narrative_type": "problem_conflict",
         "title": "测试动画标题",
-        "visual_style": "cinematic",
-        "color_palette": "红→紫→蓝→绿→金",
         "total_duration_hint": 60,
         "acts": [
-            {
-                "act": 1,
-                "name": "认知爆破",
-                "goal": "3秒抓住注意力",
-                "duration_hint": 8,
-                "method_used": "反常识",
-                "narration": "这是一个测试旁白文案不超过三十五字",
-                "narration_en": "This is a test narration",
-                "visual_description": "画面中央大号问号，冷紫色背景，文字从下方弹入",
-                "on_screen_text": "震撼大字",
-            },
-            {
-                "act": 2,
-                "name": "延迟满足",
-                "goal": "制造疑问",
-                "duration_hint": 10,
-                "method_used": "强化错误认知",
-                "narration": "第二幕旁白文案不超过三十五字限制",
-                "narration_en": "Act two narration",
-                "visual_description": "文字从模糊到清晰，偏冷灰紫色调",
-                "on_screen_text": "到底怎么回事",
-            },
-            {
-                "act": 3,
-                "name": "层层揭秘",
-                "goal": "逐步解锁",
-                "duration_hint": 20,
-                "method_used": "一问一答",
-                "narration": "第三幕旁白逐一解释每个层面",
-                "narration_en": "Act three step by step",
-                "visual_description": "逐条滑入，清爽蓝白色调",
-                "on_screen_text": "原来是这样",
-            },
-            {
-                "act": 4,
-                "name": "高潮揭晓",
-                "goal": "颠覆认知",
-                "duration_hint": 12,
-                "method_used": "放大对比",
-                "narration": "第四幕揭示核心原理让人恍然大悟",
-                "narration_en": "The big reveal",
-                "visual_description": "核心概念放大加外发光，旧认知淡出",
-                "on_screen_text": "原来如此",
-            },
-            {
-                "act": 5,
-                "name": "记忆钉",
-                "goal": "留下传播点",
-                "duration_hint": 10,
-                "method_used": "金句总结",
-                "narration": "第五幕一句话总结让人印象深刻",
-                "narration_en": "Memorable takeaway",
-                "visual_description": "文字居中放大，暖金色调，优雅定格",
-                "on_screen_text": "记住这一句",
-            },
+            {"act": 1, "name": "认知爆破", "goal": "3秒抓住注意力", "duration_hint": 8,
+             "method_used": "反常识", "narration": "这是一个测试旁白文案不超过三十五字",
+             "narration_en": "This is a test narration", "on_screen_text": "震撼大字", "emotion": "震惊"},
+            {"act": 2, "name": "延迟满足", "goal": "制造疑问", "duration_hint": 10,
+             "method_used": "强化错误认知", "narration": "第二幕旁白文案不超过三十五字限制",
+             "narration_en": "Act two narration", "on_screen_text": "到底怎么回事", "emotion": "好奇"},
+            {"act": 3, "name": "层层揭秘", "goal": "逐步解锁", "duration_hint": 20,
+             "method_used": "一问一答", "narration": "第三幕旁白逐一解释每个层面",
+             "narration_en": "Act three step by step", "on_screen_text": "原来是这样", "emotion": "理解"},
+            {"act": 4, "name": "高潮揭晓", "goal": "颠覆认知", "duration_hint": 12,
+             "method_used": "放大对比", "narration": "第四幕揭示核心原理让人恍然大悟",
+             "narration_en": "The big reveal", "on_screen_text": "原来如此", "emotion": "顿悟"},
+            {"act": 5, "name": "记忆钉", "goal": "留下传播点", "duration_hint": 10,
+             "method_used": "金句总结", "narration": "第五幕一句话总结让人印象深刻",
+             "narration_en": "Memorable takeaway", "on_screen_text": "记住这一句", "emotion": "满足"},
+        ],
+    }
+
+
+@pytest.fixture
+def sample_direction_json():
+    """返回一个合法的 DirectionOutput 测试数据。"""
+    return {
+        "visual_style": "cinematic",
+        "color_palette_flow": "红→紫→蓝→绿→金",
+        "acts": [
+            {"act": 1, "composition": "中央", "main_element": "大号数字", "easing": "back.out(1.7)",
+             "entrance_direction": "下方弹入", "entrance_duration_range": "0.4s", "camera_movement": "推近",
+             "visual_technique": "过冲回弹", "primary_color": "#DC2626", "bg_color": "#1a1a2e"},
+            {"act": 2, "composition": "居中", "main_element": "问号", "easing": "power2.inOut",
+             "entrance_direction": "透明度渐变", "entrance_duration_range": "1.2s", "camera_movement": "固定",
+             "visual_technique": "模糊到清晰", "primary_color": "#7C3AED", "bg_color": "#FAFBFC"},
+            {"act": 3, "composition": "左侧列表", "main_element": "步骤卡片", "easing": "power3.out",
+             "entrance_direction": "左侧滑入", "entrance_duration_range": "0.6s", "camera_movement": "微平移",
+             "visual_technique": "逐条递进", "primary_color": "#2563EB", "bg_color": "#FAFBFC"},
+            {"act": 4, "composition": "左右对比", "main_element": "对比面板", "easing": "power4.out",
+             "entrance_direction": "缩放", "entrance_duration_range": "0.8s", "camera_movement": "推近",
+             "visual_technique": "旧淡出新放大", "primary_color": "#059669", "bg_color": "#FAFBFC"},
+            {"act": 5, "composition": "居中", "main_element": "金句大字", "easing": "power4.out",
+             "entrance_direction": "缩放+上浮", "entrance_duration_range": "1.5s", "camera_movement": "拉远",
+             "visual_technique": "优雅定格", "primary_color": "#D97706", "bg_color": "#FAFBFC"},
         ],
     }

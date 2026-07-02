@@ -53,12 +53,12 @@ class TestAssembleHtml:
         assert "720" in result["html"]
 
     @pytest.mark.asyncio
-    async def test_copy_json_extracts_durations(self, sample_segments, sample_copy_json):
-        """从 copy_json 提取时长。"""
+    async def test_narrative_json_extracts_durations(self, sample_segments, sample_narrative_json):
+        """从 narrative_json 提取时长。"""
         state = {
             "segments": sample_segments,
             "settings": {},
-            "copy_json": sample_copy_json,
+            "narrative_json": sample_narrative_json,
         }
         result = await assemble_html(state)
         assert "error" not in result
@@ -66,12 +66,12 @@ class TestAssembleHtml:
         assert "8" in result["html"]
 
     @pytest.mark.asyncio
-    async def test_explicit_seg_durations_override(self, sample_segments, sample_copy_json):
-        """显式 seg_durations 优先于 copy_json 推算。"""
+    async def test_explicit_seg_durations_override(self, sample_segments, sample_narrative_json):
+        """显式 seg_durations 优先于 narrative_json 推算。"""
         state = {
             "segments": sample_segments,
             "settings": {},
-            "copy_json": sample_copy_json,
+            "narrative_json": sample_narrative_json,
             "seg_durations": [5, 5, 5, 5, 5],
         }
         result = await assemble_html(state)

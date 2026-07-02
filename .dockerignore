@@ -43,6 +43,10 @@ coverage.xml
 ehthumbs.db
 Thumbs.db
 
+# Tests
+tests/
+.pytest_cache/
+
 # Others
 README.md
 readme.md

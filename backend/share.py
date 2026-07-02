@@ -1,9 +1,12 @@
 """
 share.py — 分享链接生成、存储、验证、清理。
 从 app.py 拆分出来。
+
+v2: Redis 缓存 + aiofiles 异步 I/O + 密码哈希 + 异步清理。
 """
 import asyncio
 import base64
+import hashlib
 import html
 import io
 import json
@@ -11,11 +14,11 @@ import logging
 import os
 import secrets
 from datetime import datetime, timedelta
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
+import aiofiles
+import aiofiles.os
 import qrcode
-from fastapi import Request, HTTPException
-from fastapi.responses import HTMLResponse
 
 from backend.config import (
     shanghai_tz,
@@ -23,10 +26,70 @@ from backend.config import (
     SHARE_STORAGE_DIR,
     SHARE_CLEANUP_INTERVAL_SECONDS,
     SHARE_EXPIRATION_SECONDS,
+    get_redis,
 )
 from backend.html_postprocessor import postprocess_html
 
 logger = logging.getLogger(__name__)
+
+
+# ── 密码哈希 ──
+
+def _hash_password(password: str) -> str:
+    """对分享密码做 SHA-256 哈希（加随机盐）。"""
+    salt = secrets.token_hex(8)
+    h = hashlib.sha256(f"{salt}:{password}".encode()).hexdigest()
+    return f"sha256:{salt}:{h}"
+
+
+def _verify_password(password: str, hashed: str) -> bool:
+    """验证密码是否匹配哈希值。"""
+    if not hashed or not hashed.startswith("sha256:"):
+        return password == hashed  # 兼容旧明文密码
+    parts = hashed.split(":", 2)
+    if len(parts) != 3:
+        return False
+    _, salt, h = parts
+    return hashlib.sha256(f"{salt}:{password}".encode()).hexdigest() == h
+
+
+# ── Redis 辅助 ──
+
+async def _redis_get(key: str) -> Optional[dict]:
+    redis = get_redis()
+    if redis:
+        try:
+            data = await redis.get(key)
+            if data:
+                return json.loads(data)
+        except Exception:
+            logger.warning("Redis GET 失败 | key=%s", key, exc_info=True)
+    return None
+
+
+async def _redis_set(key: str, value: dict, ttl: Optional[int] = None):
+    redis = get_redis()
+    if redis:
+        try:
+            data = json.dumps(value, ensure_ascii=False, default=str)
+            if ttl:
+                await redis.setex(key, ttl, data)
+            else:
+                await redis.set(key, data)
+        except Exception:
+            logger.warning("Redis SET 失败 | key=%s", key, exc_info=True)
+
+
+async def _redis_delete(key: str):
+    redis = get_redis()
+    if redis:
+        try:
+            await redis.delete(key)
+        except Exception:
+            logger.warning("Redis DELETE 失败 | key=%s", key, exc_info=True)
+
+
+# ── 页面构建 ──
 
 def build_share_access_page(error_message: str = ""):
     error_html = f'<p class="error">{html.escape(error_message)}</p>' if error_message else ""
@@ -130,6 +193,8 @@ def build_shared_viewer_page(html_content: str, source_width: int, source_height
 </html>"""
 
 
+# ── 文件路径 ──
+
 def get_share_paths(share_id: str):
     return {
         "meta": os.path.join(SHARE_STORAGE_DIR, f"{share_id}.json"),
@@ -152,68 +217,128 @@ def parse_share_datetime(value: str):
     return parsed.astimezone(shanghai_tz)
 
 
-def load_share_from_disk(share_id: str):
+# ── 异步存储（aiofiles）──
+
+async def load_share_from_disk(share_id: str):
+    """异步从磁盘加载分享记录。"""
     paths = get_share_paths(share_id)
+    try:
+        await aiofiles.os.path.exists(paths["meta"])
+    except Exception:
+        pass
     if not os.path.exists(paths["meta"]) or not os.path.exists(paths["html"]):
         return None
-    with open(paths["meta"], "r", encoding="utf-8") as file:
-        meta = json.load(file)
-    with open(paths["html"], "r", encoding="utf-8") as file:
-        html_content = file.read()
-    record = {
-        "html": html_content,
-        "password": meta["password"],
-        "created_at": parse_share_datetime(meta["created_at"]),
-        "expires_at": parse_share_datetime(meta["expires_at"]) if meta.get("expires_at") else None,
-    }
-    shared_html_links[share_id] = record
-    return record
+    try:
+        async with aiofiles.open(paths["meta"], "r", encoding="utf-8") as f:
+            meta = json.loads(await f.read())
+        async with aiofiles.open(paths["html"], "r", encoding="utf-8") as f:
+            html_content = await f.read()
+        record = {
+            "html": html_content,
+            "password": meta["password"],
+            "created_at": parse_share_datetime(meta["created_at"]),
+            "expires_at": parse_share_datetime(meta["expires_at"]) if meta.get("expires_at") else None,
+        }
+        shared_html_links[share_id] = record
+        return record
+    except Exception:
+        logger.exception("load_share_from_disk 失败 | share_id=%s", share_id)
+        return None
 
 
-def save_share_to_disk(share_id: str, record: Dict[str, Any]):
+async def save_share_to_disk(share_id: str, record: Dict[str, Any]):
+    """异步保存分享记录到磁盘。"""
     os.makedirs(SHARE_STORAGE_DIR, exist_ok=True)
     paths = get_share_paths(share_id)
-    with open(paths["html"], "w", encoding="utf-8") as file:
-        file.write(record["html"])
-    with open(paths["meta"], "w", encoding="utf-8") as file:
-        json.dump(serialize_share_record(record), file, ensure_ascii=False, indent=2)
+    try:
+        async with aiofiles.open(paths["html"], "w", encoding="utf-8") as f:
+            await f.write(record["html"])
+        async with aiofiles.open(paths["meta"], "w", encoding="utf-8") as f:
+            await f.write(json.dumps(serialize_share_record(record), ensure_ascii=False, indent=2))
+    except Exception:
+        logger.exception("save_share_to_disk 失败 | share_id=%s", share_id)
 
 
-def delete_share(share_id: str):
+async def delete_share(share_id: str):
+    """异步删除分享记录（内存 + Redis + 磁盘）。"""
     shared_html_links.pop(share_id, None)
+    await _redis_delete(f"share:{share_id}")
     for path in get_share_paths(share_id).values():
         try:
-            os.remove(path)
+            if os.path.exists(path):
+                os.remove(path)
         except FileNotFoundError:
             pass
+        except Exception:
+            logger.warning("删除分享文件失败 | path=%s", path, exc_info=True)
 
 
-def get_share_record(share_id: str):
-    record = shared_html_links.get(share_id) or load_share_from_disk(share_id)
+async def get_share_record(share_id: str):
+    """获取分享记录（Redis → 内存 → 磁盘 三级缓存）。"""
+    # 1. 先查内存
+    record = shared_html_links.get(share_id)
+    if record:
+        if record["expires_at"] and record["expires_at"] <= datetime.now(shanghai_tz):
+            await delete_share(share_id)
+            return None
+        return record
+
+    # 2. 再查 Redis
+    record = await _redis_get(f"share:{share_id}")
+    if record:
+        record["created_at"] = parse_share_datetime(record["created_at"])
+        if record.get("expires_at"):
+            record["expires_at"] = parse_share_datetime(record["expires_at"])
+        if record["expires_at"] and record["expires_at"] <= datetime.now(shanghai_tz):
+            await delete_share(share_id)
+            return None
+        shared_html_links[share_id] = record
+        return record
+
+    # 3. 最后查磁盘
+    record = await load_share_from_disk(share_id)
     if not record:
         return None
     if record["expires_at"] and record["expires_at"] <= datetime.now(shanghai_tz):
-        delete_share(share_id)
+        await delete_share(share_id)
         return None
+    # 回写 Redis
+    ttl = None
+    if record["expires_at"]:
+        ttl = int((record["expires_at"] - datetime.now(shanghai_tz)).total_seconds())
+    await _redis_set(f"share:{share_id}", serialize_share_record(record), ttl)
     return record
 
 
-def cleanup_expired_shares_once():
+# ── 过期清理（异步）──
+
+async def cleanup_expired_shares_once():
+    """异步清理过期分享（内存 + Redis + 磁盘）。"""
     now = datetime.now(shanghai_tz)
     os.makedirs(SHARE_STORAGE_DIR, exist_ok=True)
+
+    # 清理内存
     for share_id, record in list(shared_html_links.items()):
         if record["expires_at"] and record["expires_at"] <= now:
-            delete_share(share_id)
-    for filename in os.listdir(SHARE_STORAGE_DIR):
-        if not filename.endswith(".json"):
-            continue
-        share_id = filename[:-5]
-        record = load_share_from_disk(share_id)
-        if record and record["expires_at"] and record["expires_at"] <= now:
-            delete_share(share_id)
+            await delete_share(share_id)
+
+    # 清理磁盘上的过期记录
+    try:
+        for filename in os.listdir(SHARE_STORAGE_DIR):
+            if not filename.endswith(".json"):
+                continue
+            share_id = filename[:-5]
+            record = await load_share_from_disk(share_id)
+            if record and record["expires_at"] and record["expires_at"] <= now:
+                await delete_share(share_id)
+    except FileNotFoundError:
+        pass
 
 
 async def cleanup_expired_shares_loop():
     while True:
-        cleanup_expired_shares_once()
+        try:
+            await cleanup_expired_shares_once()
+        except Exception:
+            logger.exception("cleanup_expired_shares 异常")
         await asyncio.sleep(SHARE_CLEANUP_INTERVAL_SECONDS)

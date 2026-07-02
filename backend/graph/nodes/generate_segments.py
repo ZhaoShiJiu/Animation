@@ -14,9 +14,10 @@ from backend.graph.state import AnimationState
 from backend.models import AnimationSegment
 from backend.thought_filter import ThoughtProcessFilter
 from backend.graph.sse_adapter import get_stream_context
+from backend.design_system import ACT_COLOR_HINTS
 from backend.prompts import (
     build_generation_setting_instructions,
-    build_animation_from_copy_system_prompt,
+    build_animation_from_direction_system_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -146,23 +147,30 @@ async def generate_segments(state: AnimationState) -> dict:
 
         logger.info("generate_segments 完成 | raw_len=%d", len(full_response))
         return {"segments_raw": full_response}
-    except Exception as exc:
-        logger.error("generate_segments 失败: %s", exc)
+    except (ConnectionError, TimeoutError, ValueError) as exc:
+        logger.error("generate_segments LLM 调用失败: %s", exc)
         return {
             "segments_raw": "",
             "error": f"LLM 调用失败: {exc}",
         }
+    except Exception as exc:
+        logger.exception("generate_segments 未知错误")
+        return {
+            "segments_raw": "",
+            "error": f"生成失败: {exc}",
+        }
 
 
-# ── generate_animation（two_stage_graph 使用）──
+# ── generate_animation（three_stage_graph 使用）──
 
 async def generate_animation(state: AnimationState) -> dict:
-    """从 copy_json 生成 5 段动画视觉内容。
+    """从 narrative_json + direction_json 生成 5 段动画视觉内容。
 
-    输入：copy_json / settings / validation_feedback（如有）
+    输入：narrative_json / direction_json / settings / validation_feedback（如有）
     输出：segments_raw（LLM 原始 JSON 字符串）
     """
-    copy_json = state.get("copy_json", {})
+    narrative_json = state.get("narrative_json", {})
+    direction_json = state.get("direction_json", {})
     settings = state.get("settings", {})
     feedback = state.get("validation_feedback", "")
     retry_count = state.get("retry_count", 0)
@@ -174,18 +182,19 @@ async def generate_animation(state: AnimationState) -> dict:
             "segments_valid": False,
         }
 
-    # 复用现有 prompt 构建函数
-    system_prompt = build_animation_from_copy_system_prompt(copy_json, settings)
+    system_prompt = build_animation_from_direction_system_prompt(
+        narrative_json, direction_json, settings
+    )
 
     # 追加 JSON 格式说明
     system_prompt += "\n\n" + _build_json_format_prompt()
 
-    copy_title = copy_json.get("title", "动画")
+    anim_title = narrative_json.get("title", "动画")
     messages = [
         SystemMessage(content=system_prompt),
     ]
 
-    user_content = f"请根据以上五幕文案生成5段视觉内容：{copy_title}"
+    user_content = f"请根据以上文案和动画指导生成5段视觉内容：{anim_title}"
     if feedback:
         user_content = (
             f"## ⚠️ 上次输出校验失败，请修正后重新输出\n{feedback}\n\n---\n\n{user_content}"
@@ -216,11 +225,17 @@ async def generate_animation(state: AnimationState) -> dict:
 
         logger.info("generate_animation 完成 | raw_len=%d", len(full_response))
         return {"segments_raw": full_response}
-    except Exception as exc:
-        logger.error("generate_animation 失败: %s", exc)
+    except (ConnectionError, TimeoutError, ValueError) as exc:
+        logger.error("generate_animation LLM 调用失败: %s", exc)
         return {
             "segments_raw": "",
             "error": f"LLM 调用失败: {exc}",
+        }
+    except Exception as exc:
+        logger.exception("generate_animation 未知错误")
+        return {
+            "segments_raw": "",
+            "error": f"生成失败: {exc}",
         }
 
 
@@ -228,8 +243,6 @@ async def generate_animation(state: AnimationState) -> dict:
 
 def _build_topic_segments_prompt(topic: str, outline: dict, si: dict) -> str:
     """构建 topic 模式下的 segments 生成 prompt。"""
-    color_hints = ["#DC2626", "#7C3AED", "#2563EB", "#059669", "#D97706"]
-
     return f"""你是动画内容填充专家。为概念「{topic}」创作动画视觉内容。
 
 ## 概念分析
@@ -247,7 +260,7 @@ def _build_topic_segments_prompt(topic: str, outline: dict, si: dict) -> str:
 - 段4（8s）：金句收尾 → 推荐使用 visualSVG
 
 ## 颜色分配
-5段依次使用：{", ".join(color_hints)}
+5段依次使用：{", ".join(ACT_COLOR_HINTS)}
 
 ## SVG 规则
 - viewBox 坐标系，stroke-linecap='round' stroke-linejoin='round'

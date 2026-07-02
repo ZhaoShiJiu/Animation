@@ -23,7 +23,8 @@ class AnimationState(TypedDict, total=False):
 
     # ── 中间产物 ──
     outline: dict                       # 主题/论文分析结果
-    copy_json: dict                     # 5 幕文案（two_stage_graph 专用）
+    narrative_json: dict                # 纯文案
+    direction_json: dict                # 动画指导
     segments_raw: str                   # LLM 原始输出的 JSON 字符串
     segments: list[dict]                # Pydantic 校验后的 5 段数据
     seg_durations: list[int]            # 每段时间分配
@@ -36,5 +37,6 @@ class AnimationState(TypedDict, total=False):
     validation_feedback: str            # 校验失败时给 LLM 的修正指令
     retry_count: int                    # 当前重试次数
     max_retries: int                    # 最大重试次数，默认 2
-    copy_valid: bool                    # copy 是否通过 Pydantic 校验
+    narrative_valid: bool               # 纯文案是否通过 Pydantic 校验
+    direction_valid: bool               # 动画指导是否通过 Pydantic 校验
     segments_valid: bool                # segments 是否通过 Pydantic 校验

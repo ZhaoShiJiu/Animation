@@ -15,15 +15,8 @@ from backend.graph.nodes.assemble import assemble_html
 from backend.graph.nodes.postprocess import postprocess_html_node
 from backend.graph.edges.routing import after_validate_segments
 
-_paper_graph = None
-
-
-def build_paper_graph() -> StateGraph:
+def build_paper_graph():
     """构建 paper → animation 的 LangGraph 图。"""
-    global _paper_graph
-    if _paper_graph is not None:
-        return _paper_graph
-
     graph = StateGraph(AnimationState)
 
     graph.add_node("analyze_paper", analyze_paper)
@@ -50,5 +43,4 @@ def build_paper_graph() -> StateGraph:
     graph.add_edge("assemble", "postprocess")
     graph.add_edge("postprocess", END)
 
-    _paper_graph = graph.compile()
-    return _paper_graph
+    return graph.compile()

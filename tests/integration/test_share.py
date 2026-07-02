@@ -71,7 +71,8 @@ class TestShareCRUD:
         yield
         shared_html_links.clear()
 
-    def test_save_and_load(self):
+    @pytest.mark.asyncio
+    async def test_save_and_load(self):
         """保存后能正确加载。"""
         now = datetime.now(shanghai_tz)
         record = {
@@ -80,18 +81,20 @@ class TestShareCRUD:
             "created_at": now,
             "expires_at": now + timedelta(hours=1),
         }
-        save_share_to_disk("test001", record)
-        loaded = load_share_from_disk("test001")
+        await save_share_to_disk("test001", record)
+        loaded = await load_share_from_disk("test001")
 
         assert loaded is not None
         assert loaded["html"] == record["html"]
         assert loaded["password"] == record["password"]
 
-    def test_load_nonexistent_returns_none(self):
+    @pytest.mark.asyncio
+    async def test_load_nonexistent_returns_none(self):
         """不存在的分享返回 None。"""
-        assert load_share_from_disk("nonexistent") is None
+        assert await load_share_from_disk("nonexistent") is None
 
-    def test_delete_share(self):
+    @pytest.mark.asyncio
+    async def test_delete_share(self):
         """删除分享应同时清理内存和磁盘。"""
         now = datetime.now(shanghai_tz)
         record = {
@@ -100,14 +103,15 @@ class TestShareCRUD:
             "created_at": now,
             "expires_at": now + timedelta(hours=1),
         }
-        save_share_to_disk("to_delete", record)
+        await save_share_to_disk("to_delete", record)
         shared_html_links["to_delete"] = record
 
-        delete_share("to_delete")
+        await delete_share("to_delete")
         assert "to_delete" not in shared_html_links
-        assert load_share_from_disk("to_delete") is None
+        assert await load_share_from_disk("to_delete") is None
 
-    def test_get_share_record_in_memory(self):
+    @pytest.mark.asyncio
+    async def test_get_share_record_in_memory(self):
         """从内存缓存获取分享。"""
         now = datetime.now(shanghai_tz)
         record = {
@@ -117,11 +121,12 @@ class TestShareCRUD:
             "expires_at": now + timedelta(hours=1),
         }
         shared_html_links["cache_test"] = record
-        result = get_share_record("cache_test")
+        result = await get_share_record("cache_test")
         assert result is not None
         assert result["html"] == "<div>cached</div>"
 
-    def test_get_share_record_expired(self):
+    @pytest.mark.asyncio
+    async def test_get_share_record_expired(self):
         """过期分享应被删除并返回 None。"""
         now = datetime.now(shanghai_tz)
         record = {
@@ -131,11 +136,12 @@ class TestShareCRUD:
             "expires_at": now - timedelta(hours=1),  # 1小时前过期
         }
         shared_html_links["expired_test"] = record
-        result = get_share_record("expired_test")
+        result = await get_share_record("expired_test")
         assert result is None
         assert "expired_test" not in shared_html_links
 
-    def test_get_share_record_no_expiry(self):
+    @pytest.mark.asyncio
+    async def test_get_share_record_no_expiry(self):
         """无过期时间的分享永久有效。"""
         now = datetime.now(shanghai_tz)
         record = {
@@ -145,10 +151,11 @@ class TestShareCRUD:
             "expires_at": None,
         }
         shared_html_links["forever_test"] = record
-        result = get_share_record("forever_test")
+        result = await get_share_record("forever_test")
         assert result is not None
 
-    def test_cleanup_expired_shares(self):
+    @pytest.mark.asyncio
+    async def test_cleanup_expired_shares(self):
         """清理任务应删除过期分享。"""
         now = datetime.now(shanghai_tz)
         expired = {
@@ -166,7 +173,7 @@ class TestShareCRUD:
         shared_html_links["exp"] = expired
         shared_html_links["val"] = valid
 
-        cleanup_expired_shares_once()
+        await cleanup_expired_shares_once()
 
         assert "exp" not in shared_html_links
         assert "val" in shared_html_links

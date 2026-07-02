@@ -1,8 +1,9 @@
 """
 nodes/validate.py — Pydantic 校验节点 + 重试反馈生成。
 
-validate_copy:      校验 copy_json（CopySchema）
-validate_segments:  校验 segments_raw（AnimationOutput）
+validate_narrative:    校验 narrative_json（NarrativeOutput）
+validate_direction:    校验 direction_json（DirectionOutput）
+validate_segments:     校验 segments_raw（AnimationOutput）
 
 校验失败时生成精确的 validation_feedback，注入下一次 LLM 调用的 prompt。
 """
@@ -12,40 +13,46 @@ import logging
 from pydantic import ValidationError
 
 from backend.graph.state import AnimationState
-from backend.models import CopySchema, AnimationOutput
+from backend.models import (
+    AnimationOutput,
+    NarrativeOutput,
+    DirectionOutput,
+)
 
 logger = logging.getLogger(__name__)
 
 
-async def validate_copy(state: AnimationState) -> dict:
-    """校验两阶段流程中 generate_copy 产出的文案 JSON。
+# ── 纯文案校验 ──
 
-    成功：copy_valid=True, retry_count 重置
-    失败：copy_valid=False, validation_feedback 精确指出问题
+async def validate_narrative(state: AnimationState) -> dict:
+    """校验纯文案 JSON（NarrativeOutput）。
+
+    成功：narrative_valid=True, retry_count 重置
+    失败：narrative_valid=False, validation_feedback 精确指出问题
     """
-    copy_json = state.get("copy_json", {})
+    narrative_json = state.get("narrative_json", {})
     retry_count = state.get("retry_count", 0)
 
-    if not copy_json:
+    if not narrative_json:
         return {
-            "copy_valid": False,
+            "narrative_valid": False,
             "validation_feedback": "上一次未输出任何 JSON，请输出完整的五幕文案 JSON 对象。",
             "retry_count": retry_count + 1,
         }
 
     try:
-        CopySchema.model_validate(copy_json)
-        logger.info("validate_copy 通过 | title=%s | acts=%d",
-                    copy_json.get("title"), len(copy_json.get("acts", [])))
+        NarrativeOutput.model_validate(narrative_json)
+        logger.info("validate_narrative 通过 | title=%s | acts=%d",
+                    narrative_json.get("title"), len(narrative_json.get("acts", [])))
         return {
-            "copy_valid": True,
+            "narrative_valid": True,
             "validation_feedback": None,
             "retry_count": 0,
         }
     except ValidationError as exc:
         errors = exc.errors()
         details = []
-        for err in errors[:8]:  # 最多报 8 个错误
+        for err in errors[:8]:
             loc = " → ".join(str(l) for l in err["loc"])
             details.append(f"  - {loc}: {err['msg']}")
 
@@ -55,17 +62,74 @@ async def validate_copy(state: AnimationState) -> dict:
 
 请修正后重新输出完整 JSON 对象，特别注意：
 - 顶层必须包含 title、acts 等字段
-- acts 必须是数组，每个元素包含 act / name / narration / visual_description 等必填字段
+- acts 必须是数组，恰好 5 个元素
+- 每个元素包含 act / name / narration / on_screen_text 等必填字段
 - narration 中文旁白每句不超过 35 字"""
 
-        logger.warning("validate_copy 失败 | errors=%d", len(errors))
+        logger.warning("validate_narrative 失败 | errors=%d", len(errors))
         return {
-            "copy_valid": False,
+            "narrative_valid": False,
             "error": f"文案校验失败: {len(errors)} 个错误",
             "validation_feedback": feedback,
             "retry_count": retry_count + 1,
         }
 
+
+# ── 动画指导校验 ──
+
+async def validate_direction(state: AnimationState) -> dict:
+    """校验动画指导 JSON（DirectionOutput）。
+
+    成功：direction_valid=True, retry_count 重置
+    失败：direction_valid=False, validation_feedback 精确指出问题
+    """
+    direction_json = state.get("direction_json", {})
+    retry_count = state.get("retry_count", 0)
+
+    if not direction_json:
+        return {
+            "direction_valid": False,
+            "validation_feedback": "上一次未输出任何 JSON，请输出完整的动画指导 JSON 对象。",
+            "retry_count": retry_count + 1,
+        }
+
+    try:
+        DirectionOutput.model_validate(direction_json)
+        logger.info("validate_direction 通过 | style=%s | acts=%d",
+                    direction_json.get("visual_style"),
+                    len(direction_json.get("acts", [])))
+        return {
+            "direction_valid": True,
+            "validation_feedback": None,
+            "retry_count": 0,
+        }
+    except ValidationError as exc:
+        errors = exc.errors()
+        details = []
+        for err in errors[:8]:
+            loc = " → ".join(str(l) for l in err["loc"])
+            details.append(f"  - {loc}: {err['msg']}")
+
+        feedback = f"""上一次输出校验失败，共 {len(errors)} 个错误：
+
+{chr(10).join(details)}
+
+请修正后重新输出完整 JSON 对象，特别注意：
+- 顶层必须包含 visual_style、color_palette_flow、acts
+- acts 恰好 5 个元素
+- 每个元素包含 easing / entrance_direction / camera_movement 等必填字段
+- 颜色字段必须是合法的 hex 值（如 #DC2626）"""
+
+        logger.warning("validate_direction 失败 | errors=%d", len(errors))
+        return {
+            "direction_valid": False,
+            "error": f"动画指导校验失败: {len(errors)} 个错误",
+            "validation_feedback": feedback,
+            "retry_count": retry_count + 1,
+        }
+
+
+# ── 动画实现校验 ──
 
 async def validate_segments(state: AnimationState) -> dict:
     """校验 segments_raw（LLM 原始 JSON 输出）。

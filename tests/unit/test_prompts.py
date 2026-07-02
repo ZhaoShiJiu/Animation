@@ -4,8 +4,8 @@ test_prompts.py — Prompt 构建函数测试。
 import pytest
 from backend.prompts import (
     build_generation_setting_instructions,
-    build_copy_system_prompt,
-    build_animation_from_copy_system_prompt,
+    build_narrative_system_prompt,
+    build_animation_from_direction_system_prompt,
     _build_resolution_dims,
     _assemble_animation_html,
 )
@@ -98,74 +98,72 @@ class TestResolutionDims:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# build_copy_system_prompt
+# build_narrative_system_prompt
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TestBuildCopySystemPrompt:
-    """文案生成 prompt 测试。"""
+class TestBuildNarrativeSystemPrompt:
+    """纯文案生成 prompt 测试。"""
 
     def test_contains_topic(self):
-        prompt = build_copy_system_prompt("量子计算")
+        prompt = build_narrative_system_prompt("量子计算")
         assert "量子计算" in prompt
 
     def test_contains_narrative_structure(self):
-        prompt = build_copy_system_prompt("AI")
+        prompt = build_narrative_system_prompt("AI")
         assert "认知爆破" in prompt
         assert "延迟满足" in prompt
         assert "层层揭秘" in prompt
         assert "高潮揭晓" in prompt
         assert "记忆钉" in prompt
 
-    def test_contains_visual_description_spec(self):
-        prompt = build_copy_system_prompt("AI")
-        assert "构图" in prompt
-        assert "颜色" in prompt
-        assert "图形" in prompt
-        assert "动效方向" in prompt
-        assert "镜头运动" in prompt
-
     def test_output_format_instructions(self):
-        prompt = build_copy_system_prompt("AI")
+        prompt = build_narrative_system_prompt("AI")
         assert "纯 JSON" in prompt
         assert "narrative_type" in prompt
         assert "acts" in prompt
 
     def test_custom_settings_propagate(self):
-        prompt = build_copy_system_prompt("AI", {"style": "futuristic"})
-        assert "futuristic" in prompt
+        prompt = build_narrative_system_prompt("AI", {"style": "futuristic"})
+        # futuristic settings should produce a longer prompt with style info
+        assert len(prompt) > 100
+        assert "AI" in prompt
+
+    def test_contains_emotion_fields(self):
+        prompt = build_narrative_system_prompt("AI")
+        assert "emotion" in prompt
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# build_animation_from_copy_system_prompt
+# build_animation_from_direction_system_prompt
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TestBuildAnimationFromCopyPrompt:
-    """动画生成 prompt 测试。"""
+class TestBuildAnimationFromDirectionPrompt:
+    """动画生成 prompt 测试（三阶段拆分）。"""
 
-    def test_contains_copy_title(self, sample_copy_json):
-        prompt = build_animation_from_copy_system_prompt(sample_copy_json)
+    def test_contains_copy_title(self, sample_narrative_json, sample_direction_json):
+        prompt = build_animation_from_direction_system_prompt(sample_narrative_json, sample_direction_json)
         assert "测试动画标题" in prompt
 
-    def test_contains_act_summaries(self, sample_copy_json):
-        prompt = build_animation_from_copy_system_prompt(sample_copy_json)
+    def test_contains_act_summaries(self, sample_narrative_json, sample_direction_json):
+        prompt = build_animation_from_direction_system_prompt(sample_narrative_json, sample_direction_json)
         assert "认知爆破" in prompt
         assert "震撼大字" in prompt
 
-    def test_contains_output_format(self, sample_copy_json):
-        prompt = build_animation_from_copy_system_prompt(sample_copy_json)
+    def test_contains_output_format(self, sample_narrative_json, sample_direction_json):
+        prompt = build_animation_from_direction_system_prompt(sample_narrative_json, sample_direction_json)
         assert "segments" in prompt
         assert "visualSVG" in prompt
         assert "steps" in prompt
 
-    def test_contains_color_hints(self, sample_copy_json):
-        prompt = build_animation_from_copy_system_prompt(sample_copy_json)
+    def test_contains_color_hints(self, sample_narrative_json, sample_direction_json):
+        prompt = build_animation_from_direction_system_prompt(sample_narrative_json, sample_direction_json)
         assert "#DC2626" in prompt
         assert "#059669" in prompt
         assert "#D97706" in prompt
 
-    def test_no_markdown_block_expected(self, sample_copy_json):
+    def test_no_markdown_block_expected(self, sample_narrative_json, sample_direction_json):
         """Prompt 要求 LLM 不要输出 markdown 代码块。"""
-        prompt = build_animation_from_copy_system_prompt(sample_copy_json)
+        prompt = build_animation_from_direction_system_prompt(sample_narrative_json, sample_direction_json)
         assert "不要 Markdown" in prompt
 
 

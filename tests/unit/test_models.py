@@ -7,8 +7,6 @@ from pydantic import ValidationError
 from backend.models import (
     AnimationSegment,
     AnimationOutput,
-    CopySchema,
-    CopyAct,
     ChatRequest,
     PassphraseRequest,
     ShareRequest,
@@ -165,49 +163,6 @@ class TestAnimationOutput:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# CopySchema / CopyAct
-# ═══════════════════════════════════════════════════════════════════════════
-
-class TestCopySchema:
-    """CopySchema 校验测试。"""
-
-    def test_valid_copy_schema(self, sample_copy_json):
-        """合法文案应通过校验。"""
-        copy = CopySchema.model_validate(sample_copy_json)
-        assert copy.title == "测试动画标题"
-        assert len(copy.acts) == 5
-
-    def test_empty_acts_default(self):
-        """acts 默认为空列表。"""
-        copy = CopySchema(title="空文案", acts=[])
-        assert copy.acts == []
-
-    def test_missing_title(self):
-        """缺少 title 应报错。"""
-        with pytest.raises(ValidationError):
-            CopySchema(acts=[])
-
-    def test_default_narrative_type(self):
-        """narrative_type 默认值。"""
-        copy = CopySchema(title="标题", acts=[])
-        assert copy.narrative_type == "problem_conflict"
-
-    def test_act_fields(self):
-        """CopyAct 各字段校验。"""
-        act = CopyAct(
-            act=1,
-            name="测试幕",
-            goal="测试目标",
-            duration_hint=10,
-            method_used="反常识",
-            narration="这是一个测试旁白文案",
-            narration_en="Test narration",
-            visual_description="画面描述",
-            on_screen_text="大字",
-        )
-        assert act.act == 1
-        assert act.method_used == "反常识"
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Request models

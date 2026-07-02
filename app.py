@@ -5,8 +5,10 @@ AI 生成逻辑由 LangGraph 编排：backend/graph/
 """
 import asyncio
 import json
-from datetime import datetime
-from typing import Dict, Any
+import secrets
+import time
+from datetime import datetime, timedelta
+from typing import Dict, Any, Callable
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form
@@ -19,13 +21,9 @@ from backend.config import (
     shanghai_tz,
     ACCESS_PASSPHRASES,
     generation_semaphore,
-    export_semaphore,
     SHARE_EXPIRATION_SECONDS,
-    SHARE_CLEANUP_INTERVAL_SECONDS,
-    VIDEO_CLEANUP_INTERVAL_SECONDS,
 )
 from backend.models import (
-    ChatRequest,
     PassphraseRequest,
     ShareRequest,
     VideoExportRequest,
@@ -40,6 +38,8 @@ from backend.share import (
     save_share_to_disk,
     cleanup_expired_shares_once,
     cleanup_expired_shares_loop,
+    _hash_password,
+    _verify_password,
 )
 from backend.video_api import (
     export_video,
@@ -51,19 +51,13 @@ from backend.html_postprocessor import postprocess_html
 from backend.logger import get_logger
 
 # ── LangGraph ──
-from backend.graph.graphs.topic_graph import build_topic_graph
 from backend.graph.graphs.paper_graph import build_paper_graph
-from backend.graph.graphs.two_stage_graph import build_two_stage_graph
-from backend.graph.graphs.copy_graph import build_copy_graph
-from backend.graph.graphs.animation_graph import build_animation_graph
+from backend.graph.graphs.three_stage_graph import build_three_stage_graph
 from backend.graph.sse_adapter import stream_graph_to_sse
 
-# 编译一次，全局复用
-_topic_graph = build_topic_graph()
+# 模块级编译一次，全局复用
 _paper_graph = build_paper_graph()
-_two_stage_graph = build_two_stage_graph()
-_copy_graph = build_copy_graph()
-_animation_graph = build_animation_graph()
+_full_graph = build_three_stage_graph()
 
 logger = get_logger(__name__)
 
@@ -86,17 +80,17 @@ app.mount("/static", StaticFiles(directory="frontend/static"), name="static")
 # ── HTTP 请求日志中间件 ──
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    start_time = __import__("time").time()
+    start_time = time.time()
     logger.info("→ %s %s | client=%s", request.method, request.url.path,
                 request.client.host if request.client else "unknown")
     try:
         response = await call_next(request)
     except Exception:
-        elapsed = (__import__("time").time() - start_time) * 1000
+        elapsed = (time.time() - start_time) * 1000
         logger.exception("✗ %s %s | 耗时=%.0fms | 未捕获异常",
                          request.method, request.url.path, elapsed)
         raise
-    elapsed = (__import__("time").time() - start_time) * 1000
+    elapsed = (time.time() - start_time) * 1000
     status_code = response.status_code
     if status_code >= 500:
         logger.error("✗ %s %s → %s | 耗时=%.0fms",
@@ -113,12 +107,57 @@ async def log_requests(request: Request, call_next):
 # -----------------------------------------------------------------------
 # 辅助函数
 # -----------------------------------------------------------------------
-def parse_settings_form(settings: str) -> Dict[str, Any]:
-    try:
-        parsed = json.loads(settings or "{}")
-    except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+def _normalize_settings(settings: Any) -> Dict[str, Any]:
+    """将 settings 统一为 dict——支持 JSON 字符串或已解析的 dict。"""
+    if isinstance(settings, str):
+        try:
+            parsed = json.loads(settings or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return settings if isinstance(settings, dict) else {}
+
+
+# ── SSE 端点工厂 ──
+
+_SSE_HEADERS = {
+    "Cache-Control": "no-store",
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "X-Accel-Buffering": "no",
+}
+
+
+async def _stream_endpoint(
+    graph,
+    input_builder: Callable[[], Dict[str, Any]],
+    request: Request,
+    *,
+    semaphore: asyncio.Semaphore = None,
+) -> StreamingResponse:
+    """通用 SSE 流式端点工厂。"""
+    if semaphore is None:
+        semaphore = generation_semaphore
+
+    queued = semaphore.locked()
+
+    async def event_generator():
+        if queued:
+            yield f"data: {json.dumps({'event': 'queued'}, ensure_ascii=False)}\n\n"
+        async with semaphore:
+            if queued:
+                yield f"data: {json.dumps({'event': 'started'}, ensure_ascii=False)}\n\n"
+            try:
+                input_state = input_builder()
+                async for chunk in stream_graph_to_sse(graph, input_state, request):
+                    if await request.is_disconnected():
+                        logger.info("客户端断开连接")
+                        break
+                    yield chunk
+            except Exception as e:
+                logger.exception("Graph 执行异常")
+                yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_generator(), headers=_SSE_HEADERS)
 
 
 # -----------------------------------------------------------------------
@@ -157,18 +196,19 @@ async def create_share_link(share_request: ShareRequest, request: Request):
         logger.exception("HTML 后处理增强失败，使用原始 HTML")
         enhanced_html = share_request.html
 
-    share_id = __import__("secrets").token_urlsafe(16)
+    share_id = secrets.token_urlsafe(16)
     created_at = datetime.now(shanghai_tz)
-    expires_at = created_at + __import__("datetime").timedelta(seconds=ttl_seconds) if ttl_seconds else None
+    expires_at = created_at + timedelta(seconds=ttl_seconds) if ttl_seconds else None
+    hashed_password = _hash_password(share_request.password) if share_request.password else ""
     record = {
         "html": build_shared_viewer_page(enhanced_html, share_request.sourceWidth, share_request.sourceHeight),
-        "password": share_request.password,
+        "password": hashed_password,
         "created_at": created_at,
         "expires_at": expires_at,
     }
     from backend.config import shared_html_links
     shared_html_links[share_id] = record
-    save_share_to_disk(share_id, record)
+    await save_share_to_disk(share_id, record)
     share_url = str(request.url_for("read_shared_html", share_id=share_id))
     logger.info("分享链接已创建 | share_id=%s | expires_in=%s | url=%s",
                 share_id, share_request.expiresIn, share_url)
@@ -183,7 +223,7 @@ async def create_share_link(share_request: ShareRequest, request: Request):
 
 @app.get("/share/{share_id}", response_class=HTMLResponse)
 async def read_shared_html(share_id: str):
-    shared = get_share_record(share_id)
+    shared = await get_share_record(share_id)
     if not shared:
         raise HTTPException(status_code=404, detail="Share link expired or not found")
     if shared["password"]:
@@ -193,13 +233,13 @@ async def read_shared_html(share_id: str):
 
 @app.post("/share/{share_id}", response_class=HTMLResponse)
 async def verify_shared_html(share_id: str, request: Request):
-    shared = get_share_record(share_id)
+    shared = await get_share_record(share_id)
     if not shared:
         raise HTTPException(status_code=404, detail="Share link expired or not found")
     body = (await request.body()).decode()
     form = parse_qs(body)
     password = form.get("password", [""])[0]
-    if shared["password"] and password != shared["password"]:
+    if shared["password"] and not _verify_password(password, shared["password"]):
         return HTMLResponse(build_share_access_page("访问密码错误"), status_code=403)
     return HTMLResponse(shared["html"])
 
@@ -227,42 +267,6 @@ async def log_frontend_error(error_request: LogErrorRequest):
 # AI 生成（LangGraph）
 # -----------------------------------------------------------------------
 
-@app.post("/generate")
-async def generate(chat_request: ChatRequest, request: Request):
-    """主题 → 动画（LangGraph topic_graph）。"""
-    queued = generation_semaphore.locked()
-
-    async def event_generator():
-        if queued:
-            yield f"data: {json.dumps({'event': 'queued'}, ensure_ascii=False)}\n\n"
-        async with generation_semaphore:
-            if queued:
-                yield f"data: {json.dumps({'event': 'started'}, ensure_ascii=False)}\n\n"
-            try:
-                input_state = {
-                    "topic": chat_request.topic,
-                    "settings": chat_request.settings or {},
-                    "history": chat_request.history or [],
-                    "retry_count": 0,
-                    "max_retries": 2,
-                }
-                async for chunk in stream_graph_to_sse(_topic_graph, input_state, request):
-                    if await request.is_disconnected():
-                        logger.info("客户端断开连接（/generate）")
-                        break
-                    yield chunk
-            except Exception as e:
-                logger.exception("/generate graph 执行异常")
-                yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
-
-    headers = {
-        "Cache-Control": "no-store",
-        "Content-Type": "text/event-stream; charset=utf-8",
-        "X-Accel-Buffering": "no",
-    }
-    return StreamingResponse(event_generator(), headers=headers)
-
-
 @app.post("/paper/generate")
 async def generate_paper(
     request: Request,
@@ -270,135 +274,29 @@ async def generate_paper(
     focus: str = Form(""),
     settings: str = Form("{}"),
 ):
-    """PDF 论文 → 动画（LangGraph paper_graph）。"""
-    parsed_settings = parse_settings_form(settings)
-    queued = generation_semaphore.locked()
+    """PDF 论文 → 动画（单阶段直达）。"""
+    parsed_settings = _normalize_settings(settings)
 
-    async def event_generator():
-        if queued:
-            yield f"data: {json.dumps({'event': 'queued'}, ensure_ascii=False)}\n\n"
-        async with generation_semaphore:
-            if queued:
-                yield f"data: {json.dumps({'event': 'started'}, ensure_ascii=False)}\n\n"
-            try:
-                paper = await extract_pdf_text(pdf)
-                input_state = {
-                    "topic": paper.get("filename", "论文"),
-                    "settings": parsed_settings,
-                    "pdf_filename": paper["filename"],
-                    "pdf_text": paper["text"],
-                    "pdf_truncated": paper["truncated"],
-                    "focus": focus.strip(),
-                    "retry_count": 0,
-                    "max_retries": 2,
-                }
-                async for chunk in stream_graph_to_sse(_paper_graph, input_state, request):
-                    if await request.is_disconnected():
-                        logger.info("客户端断开连接（/paper/generate）")
-                        break
-                    yield chunk
-            except Exception as e:
-                logger.exception("/paper/generate graph 执行异常")
-                yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+    async def build_input():
+        paper = await extract_pdf_text(pdf)
+        return {
+            "topic": paper.get("filename", "论文"),
+            "settings": parsed_settings,
+            "pdf_filename": paper["filename"],
+            "pdf_text": paper["text"],
+            "pdf_truncated": paper["truncated"],
+            "focus": focus.strip(),
+            "retry_count": 0,
+            "max_retries": 2,
+        }
 
-    headers = {
-        "Cache-Control": "no-store",
-        "Content-Type": "text/event-stream; charset=utf-8",
-        "X-Accel-Buffering": "no",
-    }
-    return StreamingResponse(event_generator(), headers=headers)
-
-
-@app.post("/generate/copy")
-async def generate_copy(chat_request: ChatRequest, request: Request):
-    """主题 → 五幕文案（LangGraph copy_graph）。"""
-    queued = generation_semaphore.locked()
-
-    async def event_generator():
-        if queued:
-            yield f"data: {json.dumps({'event': 'queued'}, ensure_ascii=False)}\n\n"
-        async with generation_semaphore:
-            if queued:
-                yield f"data: {json.dumps({'event': 'started'}, ensure_ascii=False)}\n\n"
-            try:
-                input_state = {
-                    "topic": chat_request.topic,
-                    "settings": chat_request.settings or {},
-                    "retry_count": 0,
-                    "max_retries": 2,
-                }
-                async for chunk in stream_graph_to_sse(_copy_graph, input_state, request):
-                    if await request.is_disconnected():
-                        logger.info("客户端断开连接（/generate/copy）")
-                        break
-                    yield chunk
-            except Exception as e:
-                logger.exception("/generate/copy graph 执行异常")
-                yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
-
-    headers = {
-        "Cache-Control": "no-store",
-        "Content-Type": "text/event-stream; charset=utf-8",
-        "X-Accel-Buffering": "no",
-    }
-    return StreamingResponse(event_generator(), headers=headers)
-
-
-@app.post("/generate/animation")
-async def generate_animation(request: Request):
-    """文案 → 动画（LangGraph animation_graph）。
-
-    请求体：{"copy_json": {...}, "settings": {...}}
-    """
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="请求体必须是 JSON")
-    copy_json = body.get("copy_json", {})
-    if not copy_json:
-        raise HTTPException(status_code=400, detail="copy_json 不能为空")
-    settings = body.get("settings", {})
-    if isinstance(settings, str):
-        settings = parse_settings_form(settings)
-
-    queued = generation_semaphore.locked()
-
-    async def event_generator():
-        if queued:
-            yield f"data: {json.dumps({'event': 'queued'}, ensure_ascii=False)}\n\n"
-        async with generation_semaphore:
-            if queued:
-                yield f"data: {json.dumps({'event': 'started'}, ensure_ascii=False)}\n\n"
-            try:
-                input_state = {
-                    "topic": copy_json.get("title", "动画"),
-                    "settings": settings,
-                    "copy_json": copy_json,
-                    "retry_count": 0,
-                    "max_retries": 2,
-                }
-                async for chunk in stream_graph_to_sse(_animation_graph, input_state, request):
-                    if await request.is_disconnected():
-                        logger.info("客户端断开连接（/generate/animation）")
-                        break
-                    yield chunk
-            except Exception as e:
-                logger.exception("/generate/animation graph 执行异常")
-                yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
-
-    headers = {
-        "Cache-Control": "no-store",
-        "Content-Type": "text/event-stream; charset=utf-8",
-        "X-Accel-Buffering": "no",
-    }
-    return StreamingResponse(event_generator(), headers=headers)
+    return await _stream_endpoint(_paper_graph, build_input, request)
 
 
 @app.post("/generate/full")
 async def generate_full(request: Request):
-    """主题 → 文案 → 动画 两阶段合并（LangGraph two_stage_graph）。
+    """主题 → 文案 → 动画指导 → 动画 三阶段全流程。
 
-    单次请求完成原先 /generate/copy + /generate/animation 两次请求的工作。
     请求体：{"topic": "...", "settings": {...}}
     """
     try:
@@ -408,40 +306,18 @@ async def generate_full(request: Request):
     topic = body.get("topic", "").strip()
     if not topic:
         raise HTTPException(status_code=400, detail="topic 不能为空")
-    settings = body.get("settings", {})
-    if isinstance(settings, str):
-        settings = parse_settings_form(settings)
+    settings = _normalize_settings(body.get("settings", {}))
 
-    queued = generation_semaphore.locked()
-
-    async def event_generator():
-        if queued:
-            yield f"data: {json.dumps({'event': 'queued'}, ensure_ascii=False)}\n\n"
-        async with generation_semaphore:
-            if queued:
-                yield f"data: {json.dumps({'event': 'started'}, ensure_ascii=False)}\n\n"
-            try:
-                input_state = {
-                    "topic": topic,
-                    "settings": settings,
-                    "retry_count": 0,
-                    "max_retries": 2,
-                }
-                async for chunk in stream_graph_to_sse(_two_stage_graph, input_state, request):
-                    if await request.is_disconnected():
-                        logger.info("客户端断开连接（/generate/full）")
-                        break
-                    yield chunk
-            except Exception as e:
-                logger.exception("/generate/full graph 执行异常")
-                yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
-
-    headers = {
-        "Cache-Control": "no-store",
-        "Content-Type": "text/event-stream; charset=utf-8",
-        "X-Accel-Buffering": "no",
-    }
-    return StreamingResponse(event_generator(), headers=headers)
+    return await _stream_endpoint(
+        _full_graph,
+        lambda: {
+            "topic": topic,
+            "settings": settings,
+            "retry_count": 0,
+            "max_retries": 2,
+        },
+        request,
+    )
 
 
 # -----------------------------------------------------------------------
@@ -479,7 +355,7 @@ async def read_index(request: Request):
 
 @app.on_event("startup")
 async def startup_tasks():
-    cleanup_expired_shares_once()
+    await cleanup_expired_shares_once()
     asyncio.create_task(cleanup_expired_shares_loop())
     await cleanup_expired_videos_once()
     asyncio.create_task(cleanup_expired_videos_loop())
