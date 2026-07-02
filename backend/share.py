@@ -209,7 +209,7 @@ def cleanup_expired_shares_once():
             continue
         share_id = filename[:-5]
         record = load_share_from_disk(share_id)
-        if record and record["expires_at"] <= now:
+        if record and record["expires_at"] and record["expires_at"] <= now:
             delete_share(share_id)
 
 

@@ -39,13 +39,11 @@ COPY requirements.txt .
 RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple && \
     pip install --no-cache-dir -r requirements.txt
 
-# Playwright 浏览器下载走 npmmirror 国内镜像
-ENV PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright
+# Playwright 浏览器下载走官方源
 RUN python -m playwright install chromium --with-deps
 
-# 切换淘宝npm国内镜像，再安装依赖
-RUN npm config set registry https://registry.npmmirror.com && \
-    npm install -g hyperframes@0.6.121
+# 从官方 npm registry 安装 hyperframes
+RUN npm install -g hyperframes@0.6.121
 
 # 复制应用代码
 COPY . .
